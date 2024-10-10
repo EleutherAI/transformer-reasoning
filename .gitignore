@@ -4,3 +4,6 @@ __pycache__/
 runs/
 cache_dir/
 LLM/
+logs/
+results/
+wandb/
