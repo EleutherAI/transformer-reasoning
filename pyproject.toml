@@ -1,0 +1,29 @@
+[build-system]
+requires = ["setuptools"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "transformer_reasoning"
+version = "0.0.1"
+authors = [{ name = "David Johnston", email = "davidoj@fastmail.com.au" }]
+description = "Experiments in transformer reasoning"
+readme = "README.md"
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+]
+
+dependencies = [
+    "torch",
+    "transformers",
+    "datasets",
+    "tensorboard",
+    "tqdm",
+    "openai"
+]
+
+requires-python = ">=3.10"
+
+[tool.setuptools.packages.find]
+where = ["src"]

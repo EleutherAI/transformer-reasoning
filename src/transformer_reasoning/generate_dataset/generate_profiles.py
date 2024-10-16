@@ -1,9 +1,9 @@
 import random
 from datetime import datetime, timedelta
-from typing import List, Tuple, Dict
+from typing import List, Tuple, Dict, Union
 import numpy as np
 from datasets import Dataset, Features, Value, Sequence
-from utils import get_project_root
+from transformer_reasoning.utils import get_project_root
 
 with open(get_project_root() / "generated_data/NameDatabases/NamesDatabases/first names/us.txt", "r") as file:
     FIRST_NAMES = file.read().splitlines()
@@ -59,42 +59,54 @@ def partition_names(names: List[str]) -> Tuple[List[str], List[str], List[str], 
     
     return parents, children, names.copy(), names.copy()
 
-def create_relationships(parents: List[str], children: List[str], friend_pool: List[str], enemy_pool: List[str]) -> Dict[str, Dict[str, str]]:
+def create_relationships(parents: List[str], children: List[str], friend_pool: List[str], enemy_pool: List[str]) -> Tuple[Dict[str, Dict[str, Dict[str, Union[str, int]]]], Dict[str, int]]:
     relationships = {}
+    name_to_index = {}
+    
+    for i, name in enumerate(parents + children):
+        name_to_index[name] = i
+        relationships[name] = {
+            "parent": {"name": "", "index": -1},
+            "child": {"name": "", "index": -1},
+            "best_friend": {"name": "", "index": -1},
+            "worst_enemy": {"name": "", "index": -1}
+        }
+    
     for parent, child in zip(parents, children):
-        relationships[parent] = {"child": child, "best_friend": None, "worst_enemy": None}
-        relationships[child] = {"parent": parent, "best_friend": None, "worst_enemy": None}
+        relationships[parent]["child"] = {"name": child, "index": name_to_index[child]}
+        relationships[child]["parent"] = {"name": parent, "index": name_to_index[parent]}
     
     random.shuffle(friend_pool)
     random.shuffle(enemy_pool)
     
     for i in range(0, len(friend_pool), 2):
         friend1, friend2 = friend_pool[i], friend_pool[i+1]
-        relationships[friend1]["best_friend"] = friend2
-        relationships[friend2]["best_friend"] = friend1
+        relationships[friend1]["best_friend"] = {"name": friend2, "index": name_to_index[friend2]}
+        relationships[friend2]["best_friend"] = {"name": friend1, "index": name_to_index[friend1]}
     
     for i in range(0, len(enemy_pool), 2):
         enemy1, enemy2 = enemy_pool[i], enemy_pool[i+1]
-        relationships[enemy1]["worst_enemy"] = enemy2
-        relationships[enemy2]["worst_enemy"] = enemy1
+        relationships[enemy1]["worst_enemy"] = {"name": enemy2, "index": name_to_index[enemy2]}
+        relationships[enemy2]["worst_enemy"] = {"name": enemy1, "index": name_to_index[enemy1]}
     
-    return relationships
+    return relationships, name_to_index
 
 def generate_profiles():
     global N
     all_names = generate_all_names(N)
     parents, children, friend_pool, enemy_pool = partition_names(all_names)
-    relationships = create_relationships(parents, children, friend_pool, enemy_pool)
+    relationships, name_to_index = create_relationships(parents, children, friend_pool, enemy_pool)
 
     for name in all_names:
         profile = {
             "name": name,
+            "index": name_to_index[name],
             "birth_date": generate_birthdate(),
             "birth_city": random.choice(CITIES),
             "university": random.choice(UNIVERSITIES),
             "employer": random.choice(EMPLOYERS),
-            "parent": relationships[name].get("parent", ""),
-            "child": relationships[name].get("child", ""),
+            "parent": relationships[name]["parent"],
+            "child": relationships[name]["child"],
             "best_friend": relationships[name]["best_friend"],
             "worst_enemy": relationships[name]["worst_enemy"],
         }
@@ -103,19 +115,32 @@ def generate_profiles():
 # Update the features to include new fields
 chosen_params = Features({
     'name': Value('string'),
+    'index': Value('int32'),
     'birth_date': Value('timestamp[s]'),
     'birth_city': Value('string'),
     'university': Value('string'),
     'employer': Value('string'),
-    'parent': Value('string'),
-    'child': Value('string'),
-    'best_friend': Value('string'),
-    'worst_enemy': Value('string'),
+    'parent': {
+        'name': Value('string'),
+        'index': Value('int32')
+    },
+    'child': {
+        'name': Value('string'),
+        'index': Value('int32')
+    },
+    'best_friend': {
+        'name': Value('string'),
+        'index': Value('int32')
+    },
+    'worst_enemy': {
+        'name': Value('string'),
+        'index': Value('int32')
+    },
     'bio': Value('string')
 })
 
 
 if __name__ == "__main__":
-    N = 10000
+    N = 1000000
     dataset = Dataset.from_generator(generate_profiles, features=chosen_params)
     dataset.save_to_disk(str(get_project_root() / "generated_data/profiles_dataset"))

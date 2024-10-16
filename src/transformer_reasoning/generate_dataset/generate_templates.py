@@ -3,7 +3,7 @@ import random
 from openai import OpenAI
 from typing import List, Tuple
 import re
-from utils import get_project_root
+from transformer_reasoning.utils import get_project_root
 
 def load_api_key(file_path):
     with open(file_path, 'r') as file:
