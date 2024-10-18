@@ -4,6 +4,7 @@ import random
 from typing import List, Dict, Union
 from transformer_reasoning.utils import get_project_root
 import math
+import datetime
 
 # Question templates
 FIRST_ORDER_TEMPLATE = "What was {name}'s {subject}?"
@@ -28,30 +29,43 @@ def generate_question(profile: Dict, profiles: Dataset, order: int, holdout_subj
             return None
         subject = random.choice(available_subjects)
         question = FIRST_ORDER_TEMPLATE.format(name=name, subject=subject.replace('_', ' '))
-        answer = profile[subject]['name'] if subject in RELATIONS else profile[subject]
     elif order == 2:
         if not available_relations or not available_subjects:
             return None
         relation = random.choice(available_relations)
+        if profile[relation]['index']==-1:
+            return None
         related_profile = profiles[profile[relation]['index']]
         subject = random.choice(available_subjects)
         question = SECOND_ORDER_TEMPLATE.format(name=related_profile['name'], relation=INVERSE_RELATIONS[relation].replace('_', ' '), subject=subject.replace('_', ' '))
-        answer = profile[subject]
+        assert profiles[profile[relation]['index']]['name'] == related_profile['name']
+        assert profiles[related_profile[INVERSE_RELATIONS[relation]]['index']]['name'] == name
     else:  # order == 3
         if len(available_relations) < 2 or not available_subjects:
             return None
         relation2 = random.choice([INVERSE_RELATIONS[rel] for rel in available_relations])
         # Double inverse is the same relation; circular relations accepted
         relation1 = random.choice([rel for rel in available_relations])
-        
-        
         subject = random.choice(available_subjects)
         related_profile2 = profiles[profile[relation2]['index']]
         related_profile1 = profiles[related_profile2[relation1]['index']]
+        if profile[relation2]['index']==-1 or related_profile2[relation1]['index']==-1:
+            return None
         question = THIRD_ORDER_TEMPLATE.format(name=related_profile1['name'], relation1=INVERSE_RELATIONS[relation1].replace('_', ' '), 
                                         relation2=INVERSE_RELATIONS[relation2].replace('_', ' '), subject=subject.replace('_', ' '))
+        assert related_profile1['name'] == related_profile2[relation1]['name']
+        assert related_profile2['name'] == related_profile1[INVERSE_RELATIONS[relation1]]['name']
+        assert related_profile2['name'] == profile[relation2]['name']
+        assert profile['name'] == related_profile2[INVERSE_RELATIONS[relation2]]['name']
+    
+    if subject in RELATIONS:
+        answer = profile[subject]['name']
+    else:
         answer = profile[subject]
     
+    if isinstance(answer, datetime.date):
+        answer = answer.strftime('%Y-%m-%d')
+
     return {
         "question": question,
         "answer": str(answer),
@@ -91,7 +105,7 @@ def generate_qa_dataset(profiles, holdout_subjs: Dict[int, List[str]], holdout_r
     
     # Generate main dataset
     main_dataset = main_profiles.map(
-        lambda profile: generate_questions_for_profile(profile, shuffled_profiles, holdout_subjs, holdout_rels, qs_per_profile),
+        lambda profile: generate_questions_for_profile(profile, profiles, holdout_subjs, holdout_rels, qs_per_profile),
         remove_columns=main_profiles.column_names,
         batched=True,
         batch_size=1
@@ -102,7 +116,7 @@ def generate_qa_dataset(profiles, holdout_subjs: Dict[int, List[str]], holdout_r
         order: list(set(ATTRIBUTES + RELATIONS) - set(subjs)) for order, subjs in holdout_subjs.items()
     }
     heldout_subjects_dataset = main_profiles.map(
-        lambda profile: generate_questions_for_profile(profile, shuffled_profiles, complement_holdout_subjs, holdout_rels, qs_per_profile),
+        lambda profile: generate_questions_for_profile(profile, profiles, complement_holdout_subjs, holdout_rels, qs_per_profile),
         remove_columns=main_profiles.column_names,
         batched=True,
         batch_size=1
@@ -113,7 +127,7 @@ def generate_qa_dataset(profiles, holdout_subjs: Dict[int, List[str]], holdout_r
         order: list(set(RELATIONS) - set(rels)) for order, rels in holdout_rels.items()
     }
     heldout_relations_dataset = main_profiles.map(
-        lambda profile: generate_questions_for_profile(profile, shuffled_profiles, holdout_subjs, complement_holdout_rels, qs_per_profile, min_order = 2),
+        lambda profile: generate_questions_for_profile(profile, profiles, holdout_subjs, complement_holdout_rels, qs_per_profile, min_order = 2),
         remove_columns=main_profiles.column_names,
         batched=True,
         batch_size=1
@@ -121,7 +135,7 @@ def generate_qa_dataset(profiles, holdout_subjs: Dict[int, List[str]], holdout_r
     
     # Generate heldout profiles dataset
     heldout_profiles_dataset = heldout_profiles.map(
-        lambda profile: generate_questions_for_profile(profile, shuffled_profiles, {}, {}, qs_per_profile),
+        lambda profile: generate_questions_for_profile(profile, profiles, holdout_subjs, holdout_rels, qs_per_profile),
         remove_columns=heldout_profiles.column_names,
         batched=True,
         batch_size=1
@@ -139,6 +153,7 @@ def main():
     parser.add_argument("--holdout_3_rels", nargs="*", default=[], help="Relations to hold out for third-order questions")
     parser.add_argument("--holdout_profile_fraction", type=float, default=0.1, help="Fraction of profiles to hold out")
     parser.add_argument("--qs_per_profile", type=float, default=1, help="Number of questions per profile (can be fractional)")
+    parser.add_argument("--push_to_hub", action="store_true", help="Push the QA dataset to the hub")
     args = parser.parse_args()
 
     # Load the profiles dataset
@@ -163,13 +178,22 @@ def main():
     # Split the main dataset into train and validation
     split_dataset = main_dataset.train_test_split(train_size=args.train_split)
 
+    aux_datasets = dict()
+
+    if len(heldout_profiles_dataset) > 0:
+        aux_datasets['heldout_profiles'] = heldout_profiles_dataset
+
+    if len(heldout_subjects_dataset) > 0:
+        aux_datasets['heldout_subjects'] = heldout_subjects_dataset
+
+    if len(heldout_relations_dataset) > 0:
+        aux_datasets['heldout_relations'] = heldout_relations_dataset
+
     # Create a DatasetDict
     dataset_dict = DatasetDict({
         'train': split_dataset['train'],
         'validation': split_dataset['test'],
-        'heldout_subjects': heldout_subjects_dataset,
-        'heldout_relations': heldout_relations_dataset,
-        'heldout_profiles': heldout_profiles_dataset
+        **aux_datasets
     })
 
     # Save the datasets
@@ -182,6 +206,9 @@ def main():
     print(f"  Held-out Relations: {len(heldout_relations_dataset)} samples")
     print(f"  Held-out Profiles: {len(heldout_profiles_dataset)} samples")
     print(f"Dataset saved in {get_project_root() / 'generated_data/qa_dataset/'}")
+
+    if args.push_to_hub:
+        dataset_dict.push_to_hub("EleutherAI/transformer-reasoning-qa-dataset")
 
 if __name__ == "__main__":
     main()

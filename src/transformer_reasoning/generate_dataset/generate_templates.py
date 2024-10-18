@@ -71,8 +71,8 @@ def generate_diverse_prompts(prompt_function, num_prompts=50):
         'emotion': ['neutral', 'excited'],
         'vocabulary_level': ['basic', 'intermediate', 'advanced'],
     }
-    all_details = {'birth date': 'subject\'s date of birth',
-               'birth city': 'subject\'s city of birth',
+    all_details = {'birth_date': 'subject\'s date of birth',
+               'birth_city': 'subject\'s city of birth',
                'university': 'university the subject attended',
                'employer': 'subject\'s current employer'}
     
@@ -114,38 +114,6 @@ def other_sentence_prompt_generator(short_detail: str, long_detail: str):
         return prompt, (short_detail,)
     return get_other_sentence_prompt
 
-def generate_diverse_prompts(prompt_function, num_prompts=50):
-    prompt_parameters = {
-        'writing_style': ['concise', 'conversational'],
-        'tone': ['casual', 'humorous', 'serious'],
-        'sophistication': ['highbrow', 'lowbrow'],
-        'formality': ['formal', 'informal'],
-        'genre': ['academic', 'journalistic', 'technical'],
-        'figurative_language': ['literal', 'idiomatic'],
-        'emotion': ['neutral', 'excited'],
-        'vocabulary_level': ['basic', 'intermediate', 'advanced'],
-    }
-    all_details = {'birth date': 'subject\'s date of birth',
-               'birth city': 'subject\'s city of birth',
-               'university': 'university the subject attended',
-               'employer': 'subject\'s current employer'}
-    
-    prompts = []
-    attributes = []
-    for _ in range(num_prompts):
-        chosen_params = random.sample(list(prompt_parameters.keys()), 3)
-        chosen_detail = random.choice(list(all_details.keys()))
-        order = random.choice([0, 1])
-        ordered_details = ['name', chosen_detail]
-        prompt = "Generate a brief sentence template that is "
-        prompt += ", ".join([f"{random.choice(prompt_parameters[k])}" for k in chosen_params[:-1]])
-        prompt += f" and {random.choice(prompt_parameters[chosen_params[-1]])}"
-        prompt, ordered_details = prompt_function(prompt, all_details, chosen_detail, order)
-        prompts.append(prompt)
-        attributes.append(ordered_details)
-    
-    return prompts, attributes
-
 
 if __name__ == "__main__":
     import argparse
@@ -176,7 +144,7 @@ if __name__ == "__main__":
         else:
             prompt_fn = other_sentence_prompt_generator(detail, description)
 
-        diverse_prompts, attributes_list = generate_diverse_prompts(prompt_fn, num_prompts=250)
+        diverse_prompts, attributes_list = generate_diverse_prompts(prompt_fn, num_prompts=1000)
         templates = [
             template for prompt, attributes in zip(diverse_prompts, attributes_list)
             for template in query_llm(prompt)
@@ -188,7 +156,7 @@ if __name__ == "__main__":
         for detail, description in all_details.items():
             best_templates = generate_templates(detail, description)
             
-            filename = base_path / "generated_data" / "templates" / f"{detail}_templates.txt"
+            filename = base_path / "generated_data" / "templates" / f"{detail}-templates.txt"
             with open(filename, "w") as f:
                 for template in best_templates:
                     f.write(f"{template}\n")
@@ -197,7 +165,7 @@ if __name__ == "__main__":
     elif args.detail in all_details:
         best_templates = generate_templates(args.detail, all_details[args.detail])
         
-        filename = base_path / "generated_data" / "templates" / f"{args.detail}_templates.txt"
+        filename = base_path / "generated_data" / "templates" / f"{args.detail}-templates.txt"
         with open(filename, "w") as f:
             for template in best_templates:
                 f.write(f"{template}\n")
