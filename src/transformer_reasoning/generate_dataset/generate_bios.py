@@ -58,23 +58,14 @@ def generate_bios_for_profile(profile, templates, num_bios):
 def main():
     parser = argparse.ArgumentParser(description="Generate bios dataset")
     parser.add_argument("--num_bios", type=int, default=1000, help="Number of bios per person")
-    parser.add_argument("--num_people", type=int, default=None, help="Number of people to process")
-    parser.add_argument("--revise-dates", action="store_true", help="Revise dates in existing bios dataset")
+    parser.add_argument("--N", type=int, required=True, help="Number of profiles to use")
     parser.add_argument("--push-to-hub", action="store_true", help="Push the bios dataset to the hub")
     args = parser.parse_args()
-
-    if args.revise_dates:
-        bios_dataset = load_from_disk(str(get_project_root() / "generated_data/bios/bios_dataset"))
-        breakpoint()
-        bios_dataset = bios_dataset.map(lambda x: {"bio": [bio.replace(" 00:00:00", "") for bio in x["bio"]]}, batched=True, batch_size=100)
-        bios_dataset.save_to_disk(str(get_project_root() / "generated_data/bios/bios_dataset_revised"))
-        return
-
     # Load the profiles dataset
-    profiles = load_from_disk(str(get_project_root() / "generated_data/profiles_dataset"))
-    
-    if args.num_people:
-        profiles = profiles.select(range(min(args.num_people, len(profiles))))
+    profile_path = str(get_project_root() / f"generated_data/profiles_dataset_{args.N}")
+    if not os.path.exists(profile_path):
+        raise FileNotFoundError(f"Profile dataset for N={args.N} does not exist. Please generate it first.")
+    profiles = load_from_disk(profile_path)
 
     # Load the templates
     templates = load_templates(get_project_root() / "generated_data/templates")
@@ -85,12 +76,16 @@ def main():
         remove_columns=profiles.column_names,
         batched=True,
         batch_size=1
-        ).flatten()
+    ).flatten()
+
     # Save the biographies
-    bios_dataset.save_to_disk(str(get_project_root() / "generated_data/bios/bios_dataset"))
+    output_path = str(get_project_root() / f"generated_data/bios/bios_dataset_{args.N}")
+    bios_dataset.save_to_disk(output_path)
+
+    print(f"Dataset saved in {output_path}")
 
     if args.push_to_hub:
-        bios_dataset.push_to_hub("EleutherAI/transformer-reasoning-bios-dataset")
+        bios_dataset.push_to_hub(f"EleutherAI/transformer-reasoning-bios-dataset-{args.N}")
 
 if __name__ == "__main__":
     main()

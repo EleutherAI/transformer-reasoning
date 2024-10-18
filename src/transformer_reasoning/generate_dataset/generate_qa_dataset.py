@@ -5,6 +5,7 @@ from typing import List, Dict, Union
 from transformer_reasoning.utils import get_project_root
 import math
 import datetime
+import os
 
 # Question templates
 FIRST_ORDER_TEMPLATE = "What was {name}'s {subject}?"
@@ -145,6 +146,7 @@ def generate_qa_dataset(profiles, holdout_subjs: Dict[int, List[str]], holdout_r
 
 def main():
     parser = argparse.ArgumentParser(description="Generate Q&A dataset from profiles")
+    parser.add_argument("--N", type=int, required=True, help="Number of profiles to use")
     parser.add_argument("--train_split", type=float, default=0.9, help="Train split ratio (default: 0.8)")
     parser.add_argument("--holdout_1_subjs", nargs="*", default=[], help="Subjects to hold out for first-order questions")
     parser.add_argument("--holdout_2_subjs", nargs="*", default=[], help="Subjects to hold out for second-order questions")
@@ -153,11 +155,14 @@ def main():
     parser.add_argument("--holdout_3_rels", nargs="*", default=[], help="Relations to hold out for third-order questions")
     parser.add_argument("--holdout_profile_fraction", type=float, default=0.1, help="Fraction of profiles to hold out")
     parser.add_argument("--qs_per_profile", type=float, default=1, help="Number of questions per profile (can be fractional)")
-    parser.add_argument("--push_to_hub", action="store_true", help="Push the QA dataset to the hub")
+    parser.add_argument("--push-to-hub", action="store_true", help="Push the QA dataset to the hub")
     args = parser.parse_args()
 
     # Load the profiles dataset
-    profiles = load_from_disk(str(get_project_root() / "generated_data/profiles_dataset"))
+    profile_path = str(get_project_root() / f"generated_data/profiles_dataset_{args.N}")
+    if not os.path.exists(profile_path):
+        raise FileNotFoundError(f"Profile dataset for N={args.N} does not exist. Please generate it first.")
+    profiles = load_from_disk(profile_path)
 
     # Prepare holdout subjects and relations
     holdout_subjs = {
@@ -197,7 +202,8 @@ def main():
     })
 
     # Save the datasets
-    dataset_dict.save_to_disk(str(get_project_root() / "generated_data/qa_dataset"))
+    output_path = str(get_project_root() / f"generated_data/qa_dataset_{args.N}")
+    dataset_dict.save_to_disk(output_path)
 
     print(f"Generated datasets:")
     print(f"  Train: {len(split_dataset['train'])} samples")
@@ -205,10 +211,11 @@ def main():
     print(f"  Held-out Subjects: {len(heldout_subjects_dataset)} samples")
     print(f"  Held-out Relations: {len(heldout_relations_dataset)} samples")
     print(f"  Held-out Profiles: {len(heldout_profiles_dataset)} samples")
+    print(f"Dataset saved in {output_path}")
     print(f"Dataset saved in {get_project_root() / 'generated_data/qa_dataset/'}")
 
     if args.push_to_hub:
-        dataset_dict.push_to_hub("EleutherAI/transformer-reasoning-qa-dataset")
+        dataset_dict.push_to_hub(f"EleutherAI/transformer-reasoning-qa-dataset-{args.N}")
 
 if __name__ == "__main__":
     main()

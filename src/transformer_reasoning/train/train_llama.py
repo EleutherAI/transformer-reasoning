@@ -65,9 +65,9 @@ def calculate_architecture(num_params):
     hidden_size = (hidden_size // 64) * 64  # Round to nearest multiple of 64
     return n_layers, hidden_size
 
-def load_and_prepare_datasets(tokenizer, subset_size=None):
-    bios_dataset = load_from_disk(str(get_project_root() / "generated_data/bios/bios_dataset_revised"))
-    qa_dataset = load_from_disk(str(get_project_root() / "generated_data/qa_dataset"))
+def load_and_prepare_datasets(tokenizer, subset_size=None, max_order=None, N=250000):
+    bios_dataset = load_from_disk(str(get_project_root() / f"generated_data/bios/bios_dataset_{N}"))
+    qa_dataset = load_from_disk(str(get_project_root() / f"generated_data/qa_dataset_{N}"))
 
     # Prepare bios dataset
     bios_train = bios_dataset.select_columns(['bio']).rename_column('bio', 'text')
@@ -75,6 +75,10 @@ def load_and_prepare_datasets(tokenizer, subset_size=None):
     # Prepare qa dataset
     def format_qa(example):
         return {"text": f"Question: {example['questions.question']} Answer: {example['questions.answer']}"}
+
+    # Filter qa dataset based on max_order
+    if max_order is not None:
+        qa_dataset = qa_dataset.filter(lambda x: x['questions.order'] <= max_order)
 
     qa_train = qa_dataset['train'].map(format_qa)
     qa_val = qa_dataset['validation'].map(format_qa)
@@ -90,8 +94,8 @@ def load_and_prepare_datasets(tokenizer, subset_size=None):
 
     # Wrap datasets with OnTheFlyTokenizationDataset
     train_dataset = OnTheFlyTokenizationDataset(train_dataset, tokenizer)
-    qa_val = OnTheFlyTokenizationDataset(qa_val, tokenizer)
-    qa_heldout = OnTheFlyTokenizationDataset(qa_heldout, tokenizer)
+    qa_val = OnTheFlyTokenizationDataset(qa_val.select(range(min(10000, len(qa_val)))), tokenizer)
+    qa_heldout = OnTheFlyTokenizationDataset(qa_heldout.select(range(min(10000, len(qa_heldout)))), tokenizer)
 
     return train_dataset, qa_val, qa_heldout
 
@@ -130,26 +134,27 @@ def main(args):
 
     # Load and prepare datasets
     model, tokenizer = create_model_and_tokenizer(args.num_params)
-    train_dataset, val_dataset, heldout_dataset = load_and_prepare_datasets(tokenizer, args.subset_size)
+    train_dataset, val_dataset, heldout_dataset = load_and_prepare_datasets(tokenizer, args.subset_size, args.max_order, args.N)
 
     # Set up training arguments
     training_args = TrainingArguments(
         output_dir="./results",
-        num_train_epochs=3,
-        per_device_train_batch_size=8,
-        per_device_eval_batch_size=4,
-        gradient_accumulation_steps=2,
-        eval_accumulation_steps=2,
+        num_train_epochs=1,
+        per_device_train_batch_size=32,
+        per_device_eval_batch_size=16,
+        gradient_accumulation_steps=1,
+        eval_accumulation_steps=1,
         warmup_steps=500,
         weight_decay=0.01,
         logging_dir="./logs",
         logging_steps=100,
         evaluation_strategy="steps",
-        eval_steps=200000,
-        save_steps=200000,
+        eval_steps=10000,
+        save_steps=10000,
         load_best_model_at_end=True,
-        dataloader_num_workers=4,
+        dataloader_num_workers=12,
         fp16=True,
+        tf32=True,
     )
 
     # Create Trainer
@@ -175,13 +180,15 @@ def main(args):
     print("Heldout Profiles Results:", heldout_results)
 
     # Save the model
-    model.save_pretrained("./final_model")
-    tokenizer.save_pretrained("./final_model")
+    model.save_pretrained(f"./final_model_n{args.N}_p{args.num_params}_o{args.max_order}")
+    tokenizer.save_pretrained(f"./final_model_n{args.N}_p{args.num_params}_o{args.max_order}")
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Train a Llama model with specified parameters")
-    parser.add_argument("--num_params", type=int, default=10_000_000, help="Number of parameters for the model")
+    parser.add_argument("--num_params", type=int, default=1_000_000, help="Number of parameters for the model")
     parser.add_argument("--subset_size", type=int, default=None, help="Number of examples to use for training (for testing purposes)")
+    parser.add_argument("--N", type=int, default=25000, help="Number of profiles to use for QA dataset")
+    parser.add_argument("--max_order", type=int, default=None, help="Maximum order of qa dataset")
     args = parser.parse_args()
     
     main(args)
