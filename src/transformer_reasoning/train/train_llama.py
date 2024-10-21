@@ -84,6 +84,14 @@ def load_and_prepare_datasets(tokenizer, subset_size=None, max_order=None, N=250
     qa_val = qa_dataset['validation'].map(format_qa)
     qa_heldout = qa_dataset['heldout_profiles'].map(format_qa)
 
+    # Expand qa_train to 10% of train_dataset if necessary
+    if len(qa_train) < len(bios_train) * 0.1:
+        print(f"Expanding qa_train by {math.ceil(len(bios_train) * 0.1 / len(qa_train))}x")
+        repetitions = math.ceil(len(bios_train) * 0.1 / len(qa_train))
+        qa_train = qa_train.map(lambda example: example, batched=True, num_proc=4)
+        qa_train = qa_train.flatten_indices()
+        qa_train = concatenate_datasets([qa_train] * repetitions)
+    
     # Combine bios and qa datasets for training
     train_dataset = concatenate_datasets([bios_train, qa_train])
 
@@ -92,7 +100,7 @@ def load_and_prepare_datasets(tokenizer, subset_size=None, max_order=None, N=250
         qa_val = qa_val.select(range(min(subset_size, len(qa_val))))
         qa_heldout = qa_heldout.select(range(min(subset_size, len(qa_heldout))))
 
-    # Wrap datasets with OnTheFlyTokenizationDataset
+    # Wrap training dataset with OnTheFlyTokenizationDataset
     train_dataset = OnTheFlyTokenizationDataset(train_dataset, tokenizer)
     qa_val = OnTheFlyTokenizationDataset(qa_val.select(range(min(10000, len(qa_val)))), tokenizer)
     qa_heldout = OnTheFlyTokenizationDataset(qa_heldout.select(range(min(10000, len(qa_heldout)))), tokenizer)
@@ -118,15 +126,31 @@ def create_model_and_tokenizer(num_params):
     
     return model, tokenizer
 
-def compute_metrics(eval_preds):
-    logits, labels = eval_preds
-    predictions = torch.argmax(torch.tensor(logits), dim=-1)
+def find_question_end(text, tokenizer):
+    # Find the last occurrence of "? "
+    question_end = text.rfind(": ")
+    if question_end == -1:
+        return None
     
-    # Compute accuracy
-    correct = (predictions == torch.tensor(labels)).float()
-    accuracy = correct.mean().item()
+    # Tokenize up to the question mark, including special tokens
+    question_tokens = tokenizer.encode(text[:question_end+1], add_special_tokens=True)
+    return len(question_tokens)
+
+def preprocess_logits_for_metrics(logits, labels):
+    batch_size, seq_length, vocab_size = logits.shape
+    selected_logits = []
     
-    return {"accuracy": accuracy}
+    for i in range(batch_size):
+        # Decode the full sequence
+        text = tokenizer.decode(labels[i], skip_special_tokens=True)
+        question_end = find_question_end(text, tokenizer)
+        
+        if question_end is not None:
+            selected_logits.append(logits[i, question_end:, :])
+        else:
+            selected_logits.append(logits[i, -1:, :])  # Fallback if no question end found
+    
+    return torch.cat(selected_logits, dim=0)
 
 def main(args):
     model_size_mb = calculate_model_size(args.num_params)
@@ -136,23 +160,24 @@ def main(args):
     model, tokenizer = create_model_and_tokenizer(args.num_params)
     train_dataset, val_dataset, heldout_dataset = load_and_prepare_datasets(tokenizer, args.subset_size, args.max_order, args.N)
 
+    epochs = 50000000/len(train_dataset)
+    print(f"Epochs: {epochs}")
     # Set up training arguments
     training_args = TrainingArguments(
-        output_dir="./results",
-        num_train_epochs=1,
+        output_dir=f"./results/n{args.N}_p{args.num_params}_o{args.max_order}",
+        num_train_epochs=epochs,
         per_device_train_batch_size=32,
         per_device_eval_batch_size=16,
-        gradient_accumulation_steps=1,
         eval_accumulation_steps=1,
         warmup_steps=500,
         weight_decay=0.01,
-        logging_dir="./logs",
+        logging_dir=f"./logs/n{args.N}_p{args.num_params}_o{args.max_order}",
         logging_steps=100,
         evaluation_strategy="steps",
         eval_steps=10000,
         save_steps=10000,
         load_best_model_at_end=True,
-        dataloader_num_workers=12,
+        dataloader_num_workers=4,
         fp16=True,
         tf32=True,
     )
@@ -165,7 +190,7 @@ def main(args):
         eval_dataset=heldout_dataset,
         tokenizer=tokenizer,
         data_collator=DataCollatorForLanguageModeling(tokenizer=tokenizer, mlm=False),
-        compute_metrics=compute_metrics,
+        preprocess_logits_for_metrics=preprocess_logits_for_metrics,
     )
 
     # Train the model
