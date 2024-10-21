@@ -11,5 +11,6 @@ openrouter_api_key.txt
 generated_data/
 
 *.egg-info/
-final_model/
+final_model*
 .vscode/
+.pytest_cache/
