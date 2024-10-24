@@ -24,11 +24,14 @@ def generate_question(profile: Dict, profiles: Dataset, order: int, holdout_subj
     name = profile['name']
     available_relations = [rel for rel in get_available_relations(profile) if rel not in holdout_rels]
     available_subjects = [subj for subj in ATTRIBUTES + available_relations if subj not in holdout_subjs]
-    
+    chosen_subject = None
+    chosen_relations = {0: None,1: None, 2: None}
+
     if order == 1:
         if not available_subjects:
             return None
         subject = random.choice(available_subjects)
+        chosen_subject = subject
         question = FIRST_ORDER_TEMPLATE.format(name=name, subject=subject.replace('_', ' '))
     elif order == 2:
         if not available_relations or not available_subjects:
@@ -38,6 +41,8 @@ def generate_question(profile: Dict, profiles: Dataset, order: int, holdout_subj
             return None
         related_profile = profiles[profile[relation]['index']]
         subject = random.choice(available_subjects)
+        chosen_subject = subject
+        chosen_relations[1] = relation
         question = SECOND_ORDER_TEMPLATE.format(name=related_profile['name'], relation=INVERSE_RELATIONS[relation].replace('_', ' '), subject=subject.replace('_', ' '))
         assert profiles[profile[relation]['index']]['name'] == related_profile['name']
         assert profiles[related_profile[INVERSE_RELATIONS[relation]]['index']]['name'] == name
@@ -54,6 +59,10 @@ def generate_question(profile: Dict, profiles: Dataset, order: int, holdout_subj
             return None
         question = THIRD_ORDER_TEMPLATE.format(name=related_profile1['name'], relation1=INVERSE_RELATIONS[relation1].replace('_', ' '), 
                                         relation2=INVERSE_RELATIONS[relation2].replace('_', ' '), subject=subject.replace('_', ' '))
+
+        chosen_subject = subject
+        chosen_relations[1] = relation1
+        chosen_relations[2] = relation2
         assert related_profile1['name'] == related_profile2[relation1]['name']
         assert related_profile2['name'] == related_profile1[INVERSE_RELATIONS[relation1]]['name']
         assert related_profile2['name'] == profile[relation2]['name']
@@ -71,26 +80,31 @@ def generate_question(profile: Dict, profiles: Dataset, order: int, holdout_subj
         "question": question,
         "answer": str(answer),
         "order": order
+    }, {
+        "chosen_subject": chosen_subject,
+        "chosen_relations": chosen_relations
     }
 
 def generate_questions_for_profile(profile, profiles, holdout_subjs, holdout_rels, qs_per_profile, min_order = 1):
     questions = []
-    
     profile = {k: v[0] for k, v in profile.items()}
 
-    if qs_per_profile >= 1:
-        num_questions = math.ceil(qs_per_profile)
-        for _ in range(num_questions):
-            order = random.randint(min_order, 3)
-            question = generate_question(profile, profiles, order, holdout_subjs.get(order, []), holdout_rels.get(order, []))
-            if question:
+    for order in range(min_order, 4):
+        order_holdout_subjs = holdout_subjs.get(order, []).copy()
+        order_holdout_rels = holdout_rels.get(order, []).copy()
+        
+        for _ in range(min(math.ceil(qs_per_profile), (len(ATTRIBUTES) + len(RELATIONS))**order)):
+            question_params = generate_question(profile, profiles, order, order_holdout_subjs, order_holdout_rels)
+            if question_params:
+                question, params = question_params
+                subject = params['chosen_subject']
+                relation = params['chosen_relations'][order - 1]
+                if subject in ATTRIBUTES:
+                    order_holdout_subjs.append(subject)
+                elif subject in RELATIONS:
+                    order_holdout_rels.append(relation)
+                    
                 questions.append(question)
-    else:
-        if random.random() < qs_per_profile:
-            for order in range(min_order, 4):
-                question = generate_question(profile, profiles, order, holdout_subjs.get(order, []), holdout_rels.get(order, []))
-                if question:
-                    questions.append(question)
     
     return {"questions": questions}
 
@@ -147,14 +161,14 @@ def generate_qa_dataset(profiles, holdout_subjs: Dict[int, List[str]], holdout_r
 def main():
     parser = argparse.ArgumentParser(description="Generate Q&A dataset from profiles")
     parser.add_argument("--N", type=int, required=True, help="Number of profiles to use")
-    parser.add_argument("--train_split", type=float, default=0.9, help="Train split ratio (default: 0.8)")
+    parser.add_argument("--train_split", type=float, default=0.9, help="Train split ratio (default: 0.9)")
     parser.add_argument("--holdout_1_subjs", nargs="*", default=[], help="Subjects to hold out for first-order questions")
     parser.add_argument("--holdout_2_subjs", nargs="*", default=[], help="Subjects to hold out for second-order questions")
     parser.add_argument("--holdout_3_subjs", nargs="*", default=[], help="Subjects to hold out for third-order questions")
     parser.add_argument("--holdout_2_rels", nargs="*", default=[], help="Relations to hold out for second-order questions")
     parser.add_argument("--holdout_3_rels", nargs="*", default=[], help="Relations to hold out for third-order questions")
     parser.add_argument("--holdout_profile_fraction", type=float, default=0.1, help="Fraction of profiles to hold out")
-    parser.add_argument("--qs_per_profile", type=float, default=1, help="Number of questions per profile (can be fractional)")
+    parser.add_argument("--qs_per_profile", type=float, default=10, help="Number of questions per profile (can be fractional)")
     parser.add_argument("--push-to-hub", action="store_true", help="Push the QA dataset to the hub")
     args = parser.parse_args()
 
