@@ -11,10 +11,11 @@ from transformers import (
 )
 from datasets import load_from_disk, concatenate_datasets
 from transformer_reasoning.utils import get_project_root
+from transformer_reasoning.train.train_utils import calculate_model_size, create_model_and_tokenizer
+
 from dataclasses import dataclass
 from transformers.trainer_callback import TrainerCallback, TrainerControl, TrainerState
 from torch.utils.data import Dataset
-
 import glob
 import os
 
@@ -37,16 +38,6 @@ class OnTheFlyTokenizationDataset(Dataset):
             return_tensors='pt'
         )
         return {key: val.squeeze(0) for key, val in encoded.items()}
-
-
-def calculate_model_size(num_params):
-    return num_params * 4 / (1024 * 1024)  # Size in MB
-
-def calculate_architecture(num_params):
-    n_layers = int(math.log(num_params / 1e6, 2)) + 4
-    hidden_size = int(math.sqrt(num_params / (n_layers * 4)))
-    hidden_size = (hidden_size // 64) * 64  # Round to nearest multiple of 64
-    return n_layers, hidden_size
 
 def load_and_prepare_datasets(tokenizer, subset_size=None, max_order=None, N=250000, qa_ratio=0.1):
     bios_dataset = load_from_disk(str(get_project_root() / f"generated_data/bios/bios_dataset_{N}"))
@@ -90,24 +81,7 @@ def load_and_prepare_datasets(tokenizer, subset_size=None, max_order=None, N=250
 
     return train_dataset, qa_val, qa_heldout
 
-def create_model_and_tokenizer(num_params):
-    n_layers, hidden_size = calculate_architecture(num_params)
-    
-    tokenizer = AutoTokenizer.from_pretrained("meta-llama/Meta-Llama-3-8B")
-    tokenizer.pad_token = tokenizer.eos_token
 
-    config = LlamaConfig(
-        vocab_size=len(tokenizer),
-        hidden_size=hidden_size,
-        intermediate_size=hidden_size * 4,
-        num_hidden_layers=n_layers,
-        num_attention_heads=hidden_size // 64,
-        max_position_embeddings=2048,
-    )
-    
-    model = LlamaForCausalLM(config)
-    
-    return model, tokenizer
 
 def find_question_end(text, tokenizer):
     # Find the last occurrence of "? "
@@ -177,29 +151,6 @@ def main(args):
         tf32=True,
     )
 
-    # Modify training arguments for continued training
-    if args.resume_from:
-        initial_lr = training_args.learning_rate
-        training_args = TrainingArguments(
-            output_dir=f"./results/n{args.N}_p{args.num_params}_o{args.max_order}_continued_2",
-            learning_rate=initial_lr * 0.1,  # Reduce learning rate for continued training
-            warmup_steps=100,
-            per_device_train_batch_size=32,
-            per_device_eval_batch_size=16,
-            eval_accumulation_steps=1,  
-            weight_decay=0.1,
-            logging_dir=f"./logs/n{args.N}_p{args.num_params}_o{args.max_order}_continued_2",
-            logging_steps=100,
-            evaluation_strategy="steps",
-            eval_steps=10000,
-            save_steps=10000,
-            load_best_model_at_end=True,
-            dataloader_num_workers=4,
-            fp16=True,
-            tf32=True,
-        )
-
-    # Create Trainer
     trainer = Trainer(
         model=model,
         args=training_args,
@@ -210,8 +161,10 @@ def main(args):
         preprocess_logits_for_metrics=preprocess_logits_for_metrics,
     )
 
-    # Train the model
-    trainer.train()
+    if args.resume_from:
+        trainer.train(resume_from_checkpoint=latest_checkpoint)
+    else:
+        trainer.train()
 
     # Evaluate on validation set
     val_results = trainer.evaluate(val_dataset)
