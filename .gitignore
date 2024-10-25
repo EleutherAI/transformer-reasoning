@@ -4,3 +4,14 @@ __pycache__/
 runs/
 cache_dir/
 LLM/
+logs/
+results/
+wandb/
+openrouter_api_key.txt
+generated_data/
+
+*.egg-info/
+final_model*
+.vscode/
+.pytest_cache/
+*.csv
