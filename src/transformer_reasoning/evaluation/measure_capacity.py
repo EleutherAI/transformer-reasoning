@@ -1,4 +1,5 @@
 import torch
+from torch.nn import CrossEntropyLoss
 from datasets import load_from_disk
 from transformers import AutoTokenizer, AutoModelForCausalLM
 import re
@@ -7,6 +8,16 @@ import random
 from transformer_reasoning.utils import get_project_root
 import argparse
 import os
+from tqdm import tqdm
+
+def tokenwise_loss(inputs, logits):
+    # Shift so that tokens < n predict n
+    shift_labels = inputs[..., 1:].contiguous()
+    shift_logits = logits[..., :-1, :].contiguous()
+    # Calculate per-token loss
+    loss_fct = CrossEntropyLoss(reduce=False)
+    loss = loss_fct(shift_logits.view(-1, shift_logits.size(-1)), shift_labels.view(-1))
+    return loss
 
 def load_templates(template_dir) -> Dict[str, List[str]]:
     """Load all template files and return a dictionary of templates."""
@@ -26,17 +37,20 @@ def find_template_matches(bio: str, templates: Dict[str, List[str]]) -> List[Tup
     matches = []
     
     for attribute, attribute_templates in templates.items():
+        if attribute in ['best_friend', 'worst_enemy', 'parent', 'child']:
+            attribute_value = bio[f"{attribute}.name"]
+        else:
+            attribute_value = bio[attribute]
         for template in attribute_templates:
             # Convert template to regex pattern
-            pattern = re.escape(template).replace(f'\\{{{attribute}\\}}', '(.*?)')
-            match = re.search(pattern, bio)
+            pattern = re.escape(template).replace(f'\\{{{attribute}\\}}', f'{attribute_value}')
+            match = re.search(pattern, bio['bio'])
             if match:
-                value = match.group(1)
-                # Find the position of the variable in the original text
                 template_parts = template.split(f'{{{attribute}}}')
-                start_idx = bio.find(template_parts[0]) + len(template_parts[0])
-                end_idx = start_idx + len(value)
-                matches.append((attribute, value, start_idx, end_idx))
+                template_parts[0] = template_parts[0] + attribute_value
+                start_idx = bio['bio'].find(template_parts[0]) + len(template_parts[0])
+                end_idx = start_idx + len(attribute_value)
+                matches.append((attribute, attribute_value, start_idx, end_idx))
                 break  # Move to next attribute once we find a match
                 
     return matches
@@ -46,8 +60,7 @@ def get_token_ranges(text: str, tokenizer, matches: List[Tuple[str, str, int, in
     Convert character ranges to token ranges.
     Returns: List of (attribute, token_indices) tuples
     """
-    # Tokenize the full text
-    tokens = tokenizer.encode(text, add_special_tokens=True)
+
     token_ranges = []
     
     for attribute, value, start_idx, end_idx in matches:
@@ -59,7 +72,6 @@ def get_token_ranges(text: str, tokenizer, matches: List[Tuple[str, str, int, in
         # The variable tokens are between these lengths
         var_token_indices = list(range(len(prefix_tokens)-1, len(full_tokens)-1))
         token_ranges.append((attribute, var_token_indices))
-    
     return token_ranges
 
 def calculate_losses(model, tokenizer, text: str, token_ranges: List[Tuple[str, List[int]]]) -> Dict[str, Tuple[float, float]]:
@@ -71,7 +83,7 @@ def calculate_losses(model, tokenizer, text: str, token_ranges: List[Tuple[str, 
     with torch.no_grad():
         outputs = model(**inputs, labels=inputs["input_ids"])
         # Get per-token losses (batch_size=1 so we take [0])
-        token_losses = outputs.loss * inputs["input_ids"].shape[1]  # Multiply by seq length to get sum instead of mean
+        token_losses = tokenwise_loss(inputs["input_ids"], outputs.logits)
         token_losses = token_losses.cpu()
     
     attribute_losses = {}
@@ -80,7 +92,6 @@ def calculate_losses(model, tokenizer, text: str, token_ranges: List[Tuple[str, 
             first_token_loss = float(token_losses[token_indices[0]])
             all_tokens_loss = float(sum(token_losses[i] for i in token_indices))
             attribute_losses[attribute] = (first_token_loss, all_tokens_loss)
-    
     return attribute_losses
 
 def main():
@@ -109,17 +120,17 @@ def main():
     total_losses = {}  # attribute -> (sum_first_token_loss, sum_all_tokens_loss, count)
 
     # Process each bio
-    for bio in sample_bios["bio"]:
+    for bio in tqdm(sample_bios):
         # Find variable positions
         matches = find_template_matches(bio, templates)
         if not matches:
             continue
 
         # Get token ranges for variables
-        token_ranges = get_token_ranges(bio, tokenizer, matches)
+        token_ranges = get_token_ranges(bio['bio'], tokenizer, matches)
         
         # Calculate losses
-        losses = calculate_losses(model, tokenizer, bio, token_ranges)
+        losses = calculate_losses(model, tokenizer, bio['bio'], token_ranges)
         
         # Aggregate losses
         for attr, (first_loss, all_loss) in losses.items():

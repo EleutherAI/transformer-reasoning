@@ -32,13 +32,15 @@ def generate_bio(profile, templates):
     profile = {k: v['name'] if k in RELATIONS else v for k, v in profile.items()}
     profile = {k: v.strftime('%Y-%m-%d') if isinstance(v, datetime) else v for k, v in profile.items()}
     profile = {k: v for k, v in profile.items() if (isinstance(v, str) and len(v)>0)}
+    
     # Start with a name template
     name_template = random.choice(templates['name'])
     second_attribute = [attr for attr in profile.keys() if f"{{{attr}}}" in name_template and attr != "name"][0]
     bio.append(name_template.format(**profile))
     
     # Select templates for other attributes, avoiding the second attribute from the name template
-    available_attributes = set(profile.keys()) - {'name', second_attribute}
+    available_attributes = list(set(profile.keys()) - {'name', second_attribute})
+    random.shuffle(available_attributes)  # Shuffle the remaining attributes
     
     for attr in available_attributes:
         template = random.choice(templates[attr])
@@ -79,13 +81,13 @@ def main():
     ).flatten()
 
     # Save the biographies
-    output_path = str(get_project_root() / f"generated_data/bios/bios_dataset_{args.N}")
+    output_path = str(get_project_root() / f"generated_data/bios/bios_dataset_{args.N}_shuffled")
     bios_dataset.save_to_disk(output_path)
 
     print(f"Dataset saved in {output_path}")
 
     if args.push_to_hub:
-        bios_dataset.push_to_hub(f"EleutherAI/transformer-reasoning-bios-dataset-{args.N}")
+        bios_dataset.push_to_hub(f"EleutherAI/transformer-reasoning-bios-dataset-{args.N}_shuffled")
 
 if __name__ == "__main__":
     main()

@@ -11,10 +11,8 @@ from transformers import (
 )
 from datasets import load_from_disk, concatenate_datasets
 from transformer_reasoning.utils import get_project_root
-from transformer_reasoning.train.train_utils import calculate_model_size, create_model_and_tokenizer
+from transformer_reasoning.train.train_utils import calculate_model_size, create_model_and_tokenizer, chunk_and_tokenize
 
-from dataclasses import dataclass
-from transformers.trainer_callback import TrainerCallback, TrainerControl, TrainerState
 from torch.utils.data import Dataset
 import glob
 import os
@@ -40,7 +38,7 @@ class OnTheFlyTokenizationDataset(Dataset):
         return {key: val.squeeze(0) for key, val in encoded.items()}
 
 def load_and_prepare_datasets(tokenizer, subset_size=None, max_order=None, N=250000, qa_ratio=0.1):
-    bios_dataset = load_from_disk(str(get_project_root() / f"generated_data/bios/bios_dataset_{N}"))
+    bios_dataset = load_from_disk(str(get_project_root() / f"generated_data/bios/bios_dataset_{N}_shuffled"))
     qa_dataset = load_from_disk(str(get_project_root() / f"generated_data/qa_dataset_{N}"))
 
     # Prepare bios dataset
@@ -74,10 +72,12 @@ def load_and_prepare_datasets(tokenizer, subset_size=None, max_order=None, N=250
         qa_val = qa_val.select(range(min(subset_size, len(qa_val))))
         qa_heldout = qa_heldout.select(range(min(subset_size, len(qa_heldout))))
 
+    train_dataset = chunk_and_tokenize(train_dataset, tokenizer, max_seq_len=512)
+
     # Wrap training dataset with OnTheFlyTokenizationDataset
-    train_dataset = OnTheFlyTokenizationDataset(train_dataset, tokenizer)
     qa_val = OnTheFlyTokenizationDataset(qa_val.select(range(min(10000, len(qa_val)))), tokenizer)
     qa_heldout = OnTheFlyTokenizationDataset(qa_heldout.select(range(min(10000, len(qa_heldout)))), tokenizer)
+
 
     return train_dataset, qa_val, qa_heldout
 
@@ -100,18 +100,17 @@ def main(args):
 
     # Load and prepare datasets
     if args.resume_from:
-        print(f"Loading model from checkpoint: {args.resume_from}")
-        model = LlamaForCausalLM.from_pretrained(args.resume_from)
-        tokenizer = AutoTokenizer.from_pretrained(args.resume_from)
+        base_checkpoint_dir = str(get_project_root() / f"results/n{args.N}_p{args.num_params}_o{args.max_order}")
+        latest_checkpoint = max(glob.glob(os.path.join(base_checkpoint_dir, "checkpoint-*")), key=os.path.getctime)
+        print(f"Loading model from checkpoint: {latest_checkpoint}")
+        model = LlamaForCausalLM.from_pretrained(latest_checkpoint)
+        tokenizer = AutoTokenizer.from_pretrained(latest_checkpoint)
     else:
         model, tokenizer = create_model_and_tokenizer(args.num_params)
     train_dataset, val_dataset, heldout_dataset = load_and_prepare_datasets(
         tokenizer, args.subset_size, args.max_order, args.N, args.qa_ratio
     )
 
-    if args.resume_from:
-        base_checkpoint_dir = f"./results/n{args.N}_p{args.num_params}_o{args.max_order}"
-        latest_checkpoint = max(glob.glob(os.path.join(base_checkpoint_dir, "checkpoint-*")), key=os.path.getctime)
 
     def preprocess_logits_for_metrics(logits, labels):
         batch_size, seq_length, vocab_size = logits.shape
@@ -129,18 +128,18 @@ def main(args):
         
         return torch.cat(selected_logits, dim=0)
 
-    epochs = 50_000_000/len(train_dataset)
+    epochs = 150_000_000/len(train_dataset)
     print(f"Epochs: {epochs}")
     # Set up training arguments
     training_args = TrainingArguments(
-        output_dir=f"./results/n{args.N}_p{args.num_params}_o{args.max_order}",
+        output_dir=f"./results/n{args.N}_p{args.num_params}_o{args.max_order}_continued_3",
         num_train_epochs=epochs,
         per_device_train_batch_size=32,
         per_device_eval_batch_size=16,
         eval_accumulation_steps=1,
         warmup_steps=500,
-        weight_decay=0.1,
-        logging_dir=f"./logs/n{args.N}_p{args.num_params}_o{args.max_order}",
+        weight_decay=args.wd,
+        logging_dir=f"./logs/n{args.N}_p{args.num_params}_o{args.max_order}_continued_3",
         logging_steps=100,
         evaluation_strategy="steps",
         eval_steps=10000,
@@ -187,6 +186,7 @@ if __name__ == "__main__":
     parser.add_argument("--resume_from", action="store_true", help="Resume training from most recent checkpoint")
     parser.add_argument("--qa_ratio", type=float, default=0.1,
                        help="Ratio of QA examples to bios examples")
+    parser.add_argument("--wd", type=float, default=0.1, help="Weight decay")
     args = parser.parse_args()
     
     main(args)

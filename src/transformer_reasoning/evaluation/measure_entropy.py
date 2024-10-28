@@ -2,18 +2,45 @@ from collections import Counter
 import math
 from datasets import load_from_disk
 from transformer_reasoning.utils import get_project_root
+import argparse
 
-def calculate_entropy(values, attr):
-    counter = Counter(values)
-    total = len(values)
-    probabilities = [count / total for count in counter.values()]
-    ent = -sum(p * math.log2(p) for p in probabilities)
-    if attr in ['child', 'parent', 'best_friend', 'worst_enemy']:
-        return ent * 0.5
-    return ent
+def calculate_entropy(values, attr, vocab_size=50000):
+    # Calculate unique values for each component
+    if attr == 'name':
+        first_names = set(value.split()[0] for value in values)
+        middle_names = set(value.split()[1] for value in values)
+        last_names = set(value.split()[2] for value in values)
+        
+        first_name_entropy = math.log2(len(first_names))
+        middle_name_entropy = math.log2(len(middle_names))
+        last_name_entropy = math.log2(len(last_names))
+        
+        total_entropy = first_name_entropy + middle_name_entropy + last_name_entropy
+        return total_entropy
+    
+    elif attr == 'birth_date':
+        values = [value.strftime('%Y-%m-%d') for value in values]
+        days = set(value.split('-')[2] for value in values)
+        months = set(value.split('-')[1] for value in values)
+        years = set(value.split('-')[0] for value in values)
+        
+        day_entropy = math.log2(len(days))
+        month_entropy = math.log2(len(months))
+        year_entropy = math.log2(len(years))
+        
+        total_entropy = day_entropy + month_entropy + year_entropy
+        return total_entropy
+    
+    # Default case for other attributes
+    unique_values = len(set(values))
+    return math.log2(unique_values)
 
-def analyze_dataset():
-    dataset = load_from_disk(str(get_project_root() / "generated_data/profiles_dataset"))
+def analyze_dataset(N = None):    
+    dataset_path = "profiles_dataset"
+    if N != 'none':
+        dataset_path = f"profiles_dataset_{N}"
+    
+    dataset = load_from_disk(str(get_project_root() / "generated_data" / dataset_path))
     
     # Collect all values for each attribute
     attribute_values = {
@@ -49,4 +76,7 @@ def analyze_dataset():
     print(f"Total entropy: {sum(entropies.values()) * len(dataset)}")
 
 if __name__ == "__main__":
-    analyze_dataset()
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--N', type=str, choices=['10000', '25000', 'none'], default='none')
+    args = parser.parse_args()
+    analyze_dataset(args.N)
