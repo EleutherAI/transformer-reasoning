@@ -1,6 +1,6 @@
 import torch
 from torch.nn import CrossEntropyLoss
-from datasets import load_from_disk
+from datasets import load_from_disk, load_dataset
 from transformers import AutoTokenizer, AutoModelForCausalLM
 import re
 from typing import Dict, List, Tuple
@@ -9,6 +9,7 @@ from transformer_reasoning.utils import get_project_root
 import argparse
 import os
 from tqdm import tqdm
+import numpy as np
 
 def tokenwise_loss(inputs, logits):
     # Shift so that tokens < n predict n
@@ -35,22 +36,35 @@ def find_template_matches(bio: str, templates: Dict[str, List[str]]) -> List[Tup
     Returns: List of (attribute, value, start_idx, end_idx) tuples
     """
     matches = []
-    
     for attribute, attribute_templates in templates.items():
-        if attribute in ['best_friend', 'worst_enemy', 'parent', 'child']:
-            attribute_value = bio[f"{attribute}.name"]
-        else:
-            attribute_value = bio[attribute]
+        # Get the attribute value
+
         for template in attribute_templates:
-            # Convert template to regex pattern
-            pattern = re.escape(template).replace(f'\\{{{attribute}\\}}', f'{attribute_value}')
-            match = re.search(pattern, bio['bio'])
-            if match:
-                template_parts = template.split(f'{{{attribute}}}')
-                template_parts[0] = template_parts[0] + attribute_value
-                start_idx = bio['bio'].find(template_parts[0]) + len(template_parts[0])
-                end_idx = start_idx + len(attribute_value)
-                matches.append((attribute, attribute_value, start_idx, end_idx))
+            # Replace all variables in template with their values
+            pattern = template
+            values = {}  # Store all values used in this template
+            
+            # Find all variables in template
+            vars_in_template = re.findall(r'(?<=\{)([^{}}]+)(?=\})', template)
+            for var in vars_in_template:
+                if var in ['best_friend', 'worst_enemy', 'parent', 'child']:
+                    var_value = bio[f"{var}.name"]
+                elif var == 'birth_date':
+                    var_value = bio['birth_date'].strftime('%Y-%m-%d')
+                else:
+                    var_value = bio[var]
+                values[var] = var_value
+                pattern = pattern.replace(f'{{{var}}}', var_value)
+                
+            # Check if this template matches the bio
+            if pattern in bio['bio']:
+                # Find positions for each variable in the matched text
+                text_pos = bio['bio'].find(pattern)
+                for var, value in values.items():
+                    var_pos = pattern.find(value)
+                    start_idx = text_pos + var_pos
+                    end_idx = start_idx + len(value)
+                    matches.append((var, value, start_idx, end_idx))
                 break  # Move to next attribute once we find a match
                 
     return matches
@@ -89,8 +103,8 @@ def calculate_losses(model, tokenizer, text: str, token_ranges: List[Tuple[str, 
     attribute_losses = {}
     for attribute, token_indices in token_ranges:
         if token_indices:  # Check if we found any tokens
-            first_token_loss = float(token_losses[token_indices[0]])
-            all_tokens_loss = float(sum(token_losses[i] for i in token_indices))
+            first_token_loss = np.log2(np.exp(float(token_losses[token_indices[0]])))
+            all_tokens_loss = np.log2(np.exp(float(sum(token_losses[i] for i in token_indices))))
             attribute_losses[attribute] = (first_token_loss, all_tokens_loss)
     return attribute_losses
 
@@ -109,7 +123,10 @@ def main():
     tokenizer = AutoTokenizer.from_pretrained("meta-llama/Meta-Llama-3-8B")
 
     # Load datasets
-    bios_dataset = load_from_disk(str(get_project_root() / f"generated_data/bios/bios_dataset_{args.N}"))
+    if args.N == 10000:
+        bios_dataset = load_dataset("EleutherAI/transformer-reasoning-bios-dataset-10000", revision="a4029b437d3d96cb591d12b89b6c05bade648b9d")['train']
+    else:
+        bios_dataset = load_from_disk(str(get_project_root() / f"generated_data/bios/bios_dataset_{args.N}"))
     templates = load_templates(get_project_root() / "generated_data/templates")
 
     # Sample random subset
@@ -150,4 +167,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
