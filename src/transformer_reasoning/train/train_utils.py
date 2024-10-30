@@ -8,6 +8,69 @@ from datasets import Dataset, DatasetDict
 from multiprocessing import cpu_count
 T = TypeVar("T", bound=Union[Dataset, DatasetDict])
 
+from torch.utils.data import IterableDataset, DataLoader
+import random
+from transformer_reasoning.generate_dataset.generate_bios import generate_bio, load_templates
+from transformer_reasoning.generate_dataset.generate_qa_dataset import generate_question
+from transformer_reasoning.utils import get_project_root
+
+class InfiniteBiosDataset(IterableDataset):
+    def __init__(self, profiles_dataset, tokenizer, max_seq_len=512, max_order=3, qa_prob=0.5, qa_indices = []):
+        self.profiles = profiles_dataset
+        self.tokenizer = tokenizer
+        self.max_seq_len = max_seq_len
+        self.samples_per_yield = max_seq_len//75
+        self.max_order = max_order
+        self.qa_prob = qa_prob
+        self.templates = load_templates(get_project_root() / "generated_data/templates")
+        self.qa_indices = qa_indices
+
+    def __len__(self):
+        return len(self.profiles)
+
+    def __iter__(self):
+        while True:  # Infinite iteration
+            # Generate multiple samples (either bios or QA)
+            texts = []
+            for _ in range(self.samples_per_yield):
+                if random.random() < self.qa_prob:
+                    # Generate QA
+                    profile_idx = random.choice(self.qa_indices)
+                    profile = self.profiles[profile_idx]
+                    order = random.randint(1, self.max_order)
+                    qa_result = generate_question(profile, self.profiles, order, {}, {})
+                    if qa_result:
+                        question, _ = qa_result
+                        texts.append(f"Question: {question['question']} Answer: {question['answer']}")
+                else:
+                    # Generate bio
+                    profile_idx = random.randrange(len(self.profiles))
+                    profile = self.profiles[profile_idx]
+                    texts.append(generate_bio(profile, self.templates))
+            
+            # Join texts with separator token
+            sep = self.tokenizer.eos_token or "<|endoftext|>"
+            joined_text = sep.join([""] + texts)  # Start with separator
+            
+            # Tokenize and chunk
+            output = self.tokenizer(
+                joined_text,
+                max_length=self.max_seq_len,
+                return_attention_mask=False,
+                return_overflowing_tokens=True,
+                truncation=True,
+            )
+            # Handle overflow tokens
+            if overflow := output.pop("overflow_to_sample_mapping", None):
+                # Yield all chunks except possibly incomplete last one
+                for ids in output["input_ids"][:-1]:
+                    yield {"input_ids": ids}
+            else:
+                # If no overflow, yield the single chunk if it's full
+                if len(output["input_ids"][0]) == self.max_seq_len:
+                    yield {"input_ids": output["input_ids"]}
+
+
 
 def calculate_model_size(num_params):
     return num_params * 4 / (1024 * 1024)  # Size in MB

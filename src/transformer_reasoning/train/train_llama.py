@@ -4,83 +4,47 @@ import torch
 from transformers import (
     LlamaForCausalLM,
     AutoTokenizer,
-    LlamaConfig,
     TrainingArguments,
     Trainer,
     DataCollatorForLanguageModeling,
 )
-from datasets import load_from_disk, concatenate_datasets
+from datasets import load_from_disk
 from transformer_reasoning.utils import get_project_root
-from transformer_reasoning.train.train_utils import calculate_model_size, create_model_and_tokenizer, chunk_and_tokenize
+from transformer_reasoning.train.train_utils import calculate_model_size, create_model_and_tokenizer, InfiniteBiosDataset
 
 from torch.utils.data import Dataset
 import glob
 import os
 
-class OnTheFlyTokenizationDataset(Dataset):
-    def __init__(self, dataset, tokenizer, max_length=512):
-        self.dataset = dataset
-        self.tokenizer = tokenizer
-        self.max_length = max_length
-
-    def __len__(self):
-        return len(self.dataset)
-
-    def __getitem__(self, idx):
-        item = self.dataset[idx]
-        encoded = self.tokenizer(
-            item['text'],
-            truncation=True,
-            padding='max_length',
-            max_length=self.max_length,
-            return_tensors='pt'
-        )
-        return {key: val.squeeze(0) for key, val in encoded.items()}
 
 def load_and_prepare_datasets(tokenizer, subset_size=None, max_order=None, N=250000, qa_ratio=0.1):
-    bios_dataset = load_from_disk(str(get_project_root() / f"generated_data/bios/bios_dataset_{N}_shuffled"))
-    qa_dataset = load_from_disk(str(get_project_root() / f"generated_data/qa_dataset_{N}"))
-
-    # Prepare bios dataset
-    bios_train = bios_dataset.select_columns(['bio']).rename_column('bio', 'text')
-
-    # Prepare qa dataset
-    def format_qa(example):
-        return {"text": f"Question: {example['questions.question']} Answer: {example['questions.answer']}"}
-
-    # Filter qa dataset based on max_order
-    if max_order is not None:
-        qa_dataset = qa_dataset.filter(lambda x: x['questions.order'] <= max_order)
-
-    qa_train = qa_dataset['train'].map(format_qa)
-    qa_val = qa_dataset['validation'].map(format_qa)
-    qa_heldout = qa_dataset['heldout_profiles'].map(format_qa)
-
-    # Modify the QA dataset expansion logic
-    if len(qa_train) < len(bios_train) * qa_ratio:
-        print(f"Expanding qa_train by {math.ceil(len(bios_train) * qa_ratio / len(qa_train))}x")
-        repetitions = math.ceil(len(bios_train) * qa_ratio / len(qa_train))
-        qa_train = qa_train.map(lambda example: example, batched=True, num_proc=4)
-        qa_train = qa_train.flatten_indices()
-        qa_train = concatenate_datasets([qa_train] * repetitions)
+    # Load profiles dataset for infinite generation
+    profiles = load_from_disk(str(get_project_root() / f"generated_data/profiles_dataset_{N}"))
     
-    # Combine bios and qa datasets for training
-    train_dataset = concatenate_datasets([bios_train, qa_train])
+    shuffled_indices = torch.randperm(len(profiles)).tolist()
 
-    if subset_size:
-        train_dataset = train_dataset.select(range(min(subset_size, len(train_dataset))))
-        qa_val = qa_val.select(range(min(subset_size, len(qa_val))))
-        qa_heldout = qa_heldout.select(range(min(subset_size, len(qa_heldout))))
+    heldout_indices = shuffled_indices[:1000]
+    retained_indices = shuffled_indices[1000:]
 
-    train_dataset = chunk_and_tokenize(train_dataset, tokenizer, max_seq_len=512)
+    # Create infinite training dataset
+    train_dataset = InfiniteBiosDataset(
+        profiles_dataset=profiles,
+        tokenizer=tokenizer,
+        max_seq_len=512,
+        max_order=max_order or 3,
+        qa_prob=qa_ratio,
+        qa_indices=retained_indices
+    )
 
-    # Wrap training dataset with OnTheFlyTokenizationDataset
-    qa_val = OnTheFlyTokenizationDataset(qa_val.select(range(min(10000, len(qa_val)))), tokenizer)
-    qa_heldout = OnTheFlyTokenizationDataset(qa_heldout.select(range(min(10000, len(qa_heldout)))), tokenizer)
-
-
-    return train_dataset, qa_val, qa_heldout
-
+    heldout_dataset = InfiniteBiosDataset(
+        profiles_dataset=profiles,
+        tokenizer=tokenizer,
+        max_seq_len=512,
+        max_order=max_order or 3,
+        qa_prob=1,
+        qa_indices=heldout_indices
+    )
+    return train_dataset, heldout_dataset
 
 
 def find_question_end(text, tokenizer):
@@ -107,7 +71,7 @@ def main(args):
         tokenizer = AutoTokenizer.from_pretrained(latest_checkpoint)
     else:
         model, tokenizer = create_model_and_tokenizer(args.num_params)
-    train_dataset, val_dataset, heldout_dataset = load_and_prepare_datasets(
+    train_dataset, heldout_dataset = load_and_prepare_datasets(
         tokenizer, args.subset_size, args.max_order, args.N, args.qa_ratio
     )
 
@@ -128,22 +92,23 @@ def main(args):
         
         return torch.cat(selected_logits, dim=0)
 
-    epochs = 150_000_000/len(train_dataset)
+    # This is the number of times we step through each profiles; the "dataset size" is infinite
+    epochs = 5_000
     print(f"Epochs: {epochs}")
     # Set up training arguments
     training_args = TrainingArguments(
-        output_dir=f"./results/n{args.N}_p{args.num_params}_o{args.max_order}_continued_3",
+        output_dir=f"./results/n{args.N}_p{args.num_params}_o{args.max_order}_wd{args.wd}_infinite",
         num_train_epochs=epochs,
-        per_device_train_batch_size=32,
+        per_device_train_batch_size=16,
         per_device_eval_batch_size=16,
         eval_accumulation_steps=1,
         warmup_steps=500,
         weight_decay=args.wd,
-        logging_dir=f"./logs/n{args.N}_p{args.num_params}_o{args.max_order}_continued_3",
+        logging_dir=f"./logs/n{args.N}_p{args.num_params}_o{args.max_order}_wd{args.wd}_infinite",
         logging_steps=100,
         evaluation_strategy="steps",
-        eval_steps=10000,
-        save_steps=10000,
+        eval_steps=20000,
+        save_steps=20000,
         load_best_model_at_end=True,
         dataloader_num_workers=4,
         fp16=True,
@@ -165,17 +130,13 @@ def main(args):
     else:
         trainer.train()
 
-    # Evaluate on validation set
-    val_results = trainer.evaluate(val_dataset)
-    print("Validation Results:", val_results)
-
     # Evaluate on heldout profiles
     heldout_results = trainer.evaluate()
     print("Heldout Profiles Results:", heldout_results)
 
     # Save the model
-    model.save_pretrained(f"./final_model_n{args.N}_p{args.num_params}_o{args.max_order}")
-    tokenizer.save_pretrained(f"./final_model_n{args.N}_p{args.num_params}_o{args.max_order}")
+    model.save_pretrained(f"./final_model_n{args.N}_p{args.num_params}_o{args.max_order}_wd{args.wd}")
+    tokenizer.save_pretrained(f"./final_model_n{args.N}_p{args.num_params}_o{args.max_order}_wd{args.wd}")
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Train a Llama model with specified parameters")
@@ -184,7 +145,7 @@ if __name__ == "__main__":
     parser.add_argument("--N", type=int, default=25000, help="Number of profiles to use for QA dataset")
     parser.add_argument("--max_order", type=int, default=None, help="Maximum order of qa dataset")
     parser.add_argument("--resume_from", action="store_true", help="Resume training from most recent checkpoint")
-    parser.add_argument("--qa_ratio", type=float, default=0.1,
+    parser.add_argument("--qa_ratio", type=float, default=0.5,
                        help="Ratio of QA examples to bios examples")
     parser.add_argument("--wd", type=float, default=0.1, help="Weight decay")
     args = parser.parse_args()
