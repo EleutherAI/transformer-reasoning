@@ -34,14 +34,8 @@ class InfiniteBiosDataset(IterableDataset):
             texts = []
             for _ in range(self.samples_per_yield):
                 if random.random() < self.qa_prob:
-                    # Generate QA
-                    profile_idx = random.choice(self.qa_indices)
-                    profile = self.profiles[profile_idx]
-                    order = random.randint(1, self.max_order)
-                    qa_result = generate_question(profile, self.profiles, order, {}, {})
-                    if qa_result:
-                        question, _ = qa_result
-                        texts.append(f"Question: {question['question']} Answer: {question['answer']}")
+                    if question := self.generate_qa():
+                        texts.append(question)
                 else:
                     # Generate bio
                     profile_idx = random.randrange(len(self.profiles))
@@ -64,12 +58,21 @@ class InfiniteBiosDataset(IterableDataset):
             if overflow := output.pop("overflow_to_sample_mapping", None):
                 # Yield all chunks except possibly incomplete last one
                 for ids in output["input_ids"][:-1]:
-                    yield {"input_ids": ids}
+                    yield {"input_ids": ids, "text": joined_text}
             else:
                 # If no overflow, yield the single chunk if it's full
                 if len(output["input_ids"][0]) == self.max_seq_len:
-                    yield {"input_ids": output["input_ids"]}
+                    yield {"input_ids": output["input_ids"], "text": joined_text}
 
+
+    def generate_qa(self):
+        profile_idx = random.choice(self.qa_indices)
+        profile = self.profiles[profile_idx]
+        order = random.randrange(1, self.max_order + 1)
+        question, _ = generate_question(profile, self.profiles, order, {}, {})
+        if question:
+            return f"Question: {question['question']} Answer: {question['answer']}"
+        return None
 
 
 def calculate_model_size(num_params):

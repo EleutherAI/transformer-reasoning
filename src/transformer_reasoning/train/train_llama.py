@@ -11,22 +11,44 @@ from transformers import (
 from datasets import load_from_disk
 from transformer_reasoning.utils import get_project_root
 from transformer_reasoning.train.train_utils import calculate_model_size, create_model_and_tokenizer, InfiniteBiosDataset
+from transformer_reasoning.generate_dataset.generate_qa_dataset import generate_question
 
-from torch.utils.data import Dataset
+from datasets import Dataset
 import glob
 import os
 
 
 def load_and_prepare_datasets(tokenizer, subset_size=None, max_order=None, N=250000, qa_ratio=0.1):
-    # Load profiles dataset for infinite generation
+    # Load profiles dataset
     profiles = load_from_disk(str(get_project_root() / f"generated_data/profiles_dataset_{N}"))
     
     shuffled_indices = torch.randperm(len(profiles)).tolist()
-
     heldout_indices = shuffled_indices[:1000]
     retained_indices = shuffled_indices[1000:]
 
-    # Create infinite training dataset
+    # Generate QA dataset for evaluation from the heldout profiles
+    heldout_profiles = profiles.select(heldout_indices)
+    eval_questions = []
+    
+    for profile in heldout_profiles:
+        qa_result = generate_question(profile, profiles, max_order or 3, {}, {})
+        if qa_result:
+            question, _ = qa_result
+            eval_questions.append(question)
+    
+    eval_dataset = Dataset.from_list(eval_questions)
+    
+    # Tokenize the evaluation dataset
+    def tokenize_qa(example):
+        text = f"<|endoftext|>Question: {example['question']} Answer: {example['answer']}"
+        return tokenizer(text, padding=True, truncation=True, max_length=512)
+    
+    eval_dataset = eval_dataset.map(
+        tokenize_qa,
+        remove_columns=eval_dataset.column_names
+    )
+
+    # Create infinite training dataset with consistent retained indices
     train_dataset = InfiniteBiosDataset(
         profiles_dataset=profiles,
         tokenizer=tokenizer,
@@ -36,15 +58,7 @@ def load_and_prepare_datasets(tokenizer, subset_size=None, max_order=None, N=250
         qa_indices=retained_indices
     )
 
-    heldout_dataset = InfiniteBiosDataset(
-        profiles_dataset=profiles,
-        tokenizer=tokenizer,
-        max_seq_len=512,
-        max_order=max_order or 3,
-        qa_prob=1,
-        qa_indices=heldout_indices
-    )
-    return train_dataset, heldout_dataset
+    return train_dataset, eval_dataset
 
 
 def find_question_end(text, tokenizer):
@@ -93,7 +107,7 @@ def main(args):
         return torch.cat(selected_logits, dim=0)
 
     # This is the number of times we step through each profiles; the "dataset size" is infinite
-    epochs = 5_000
+    epochs = 5_000*25000/len(train_dataset)
     print(f"Epochs: {epochs}")
     # Set up training arguments
     training_args = TrainingArguments(
@@ -147,7 +161,7 @@ if __name__ == "__main__":
     parser.add_argument("--resume_from", action="store_true", help="Resume training from most recent checkpoint")
     parser.add_argument("--qa_ratio", type=float, default=0.5,
                        help="Ratio of QA examples to bios examples")
-    parser.add_argument("--wd", type=float, default=0.1, help="Weight decay")
+    parser.add_argument("--wd", type=float, default=0.01, help="Weight decay")
     args = parser.parse_args()
     
     main(args)

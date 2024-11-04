@@ -11,7 +11,9 @@ import os
 from tqdm import tqdm
 import numpy as np
 from transformer_reasoning.evaluation.measure_entropy import calculate_entropy
+from transformer_reasoning.evaluation.eval_utils import get_qa_token_ranges, get_token_ranges, tokenwise_loss
 import matplotlib.pyplot as plt
+import pandas as pd
 
 def tokenwise_loss(inputs, logits):
     # Shift so that tokens < n predict n
@@ -32,7 +34,7 @@ def load_templates(template_dir) -> Dict[str, List[str]]:
                 templates[attribute] = f.read().splitlines()
     return templates
 
-def find_template_matches(bio: str, templates: Dict[str, List[str]]) -> List[Tuple[str, str, int, int]]:
+def find_template_matches(bio: Dict, bio_text: str, templates: Dict[str, List[str]]) -> List[Tuple[str, str, int, int]]:
     """
     Find all template matches in the bio and return their variable positions.
     Returns: List of (attribute, value, start_idx, end_idx) tuples
@@ -61,7 +63,7 @@ def find_template_matches(bio: str, templates: Dict[str, List[str]]) -> List[Tup
             # Check if this template matches the bio
             if pattern in bio['bio']:
                 # Find positions for each variable in the matched text
-                text_pos = bio['bio'].find(pattern)
+                text_pos = bio_text.find(pattern)
                 for var, value in values.items():
                     var_pos = pattern.find(value)
                     start_idx = text_pos + var_pos
@@ -71,28 +73,7 @@ def find_template_matches(bio: str, templates: Dict[str, List[str]]) -> List[Tup
                 
     return matches
 
-def get_token_ranges(text: str, tokenizer, matches: List[Tuple[str, str, int, int]]) -> List[Tuple[str, List[int]]]:
-    """
-    Convert character ranges to token ranges.
-    Returns: List of (attribute, token_indices) tuples
-    """
 
-    token_ranges = []
-    
-    for attribute, value, start_idx, end_idx in matches:
-        # Tokenize the text up to the start of the variable
-        prefix_tokens = tokenizer.encode(text[:start_idx], add_special_tokens=True)
-        # Tokenize the text up to the end of the variable
-        full_tokens = tokenizer.encode(text[:end_idx], add_special_tokens=True)
-        
-        # Check if tokenizing the prefix has added or changed a token
-        if len(prefix_tokens) > 1 and prefix_tokens[-1] != full_tokens[len(prefix_tokens)-1]:
-            prefix_tokens = prefix_tokens[:-1]
-
-        # The variable tokens are between these lengths
-        var_token_indices = list(range(len(prefix_tokens)-1, len(full_tokens)-1))
-        token_ranges.append((attribute, var_token_indices))
-    return token_ranges
 
 def calculate_losses(model, tokenizer, text: str, token_ranges: List[Tuple[str, List[int]]]) -> Dict[str, Tuple[float, float]]:
     """
@@ -114,26 +95,6 @@ def calculate_losses(model, tokenizer, text: str, token_ranges: List[Tuple[str, 
             attribute_losses[attribute] = (first_token_loss, all_tokens_loss)
     return attribute_losses
 
-def get_qa_token_ranges(text: str, tokenizer) -> List[int]:
-    """Get token indices for the answer portion of a QA text."""
-    # Split on "Answer: " to get the answer portion
-    parts = text.split("Answer: ")
-    if len(parts) != 2:
-        return []
-        
-    # Get position of answer in original text
-    answer_start = len(parts[0]) + len("Answer: ")
-    
-    # Tokenize text up to answer start and full text
-    prefix_tokens = tokenizer.encode(text[:answer_start], add_special_tokens=True)
-    full_tokens = tokenizer.encode(text, add_special_tokens=True)
-
-    # Check if tokenizing the prefix has added or changed a token
-    if len(prefix_tokens) > 1 and prefix_tokens[-1] != full_tokens[len(prefix_tokens)-1]:
-        prefix_tokens = prefix_tokens[:-1]
-
-    # Answer tokens are between these lengths
-    return list(range(len(prefix_tokens)-1, len(full_tokens)-1))
 
 def calculate_capacities(total_losses, dataset, N):
     """Calculate per-attribute and 2nd order QA capacities."""
@@ -197,14 +158,33 @@ def calculate_capacities(total_losses, dataset, N):
 
     return capacities, qa_capacity_2, qa_capacity_1
 
+def filename_schemes(order, N, num_parameters, wd, finite):
+
+    if finite:
+        continued_str = "continued_3" if (num_parameters != 1_000_000) and (wd == 0.1) else "continued_2"
+        parent_dir = get_project_root() / f"results/n{N}_p{num_parameters}_o{order}_wd{wd}_{continued_str}"
+    else:
+        if wd == 0.1:
+            parent_dir = get_project_root() / f"results/n{N}_p{num_parameters}_o{order}_wd{wd}_infinite"
+            if not parent_dir.exists():
+                parent_dir = get_project_root() / f"results/n{N}_p{num_parameters}_o{order}_infinite"
+            parent_dir = get_project_root() / f"results/n{N}_p{num_parameters}_o{order}_wd{wd}_infinite"
+        else:
+            parent_dir = get_project_root() / f"results/n{N}_p{num_parameters}_o{order}_wd{wd}_infinite"
+    if not parent_dir.exists():
+        print(f"Skipping {parent_dir} - path does not exist")
+        return None
+    return parent_dir
+
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--checkpoint", type=int, default=650000)
+    parser.add_argument("--checkpoint", type=str, default="latest")
     parser.add_argument("--sample-size", type=int, default=1000)
+    parser.add_argument("--finite", action="store_true")
     args = parser.parse_args()
 
     results = []
-    param_sizes = [2_000_000, 1_000_000]
+    param_sizes = [5_000_000, 2_000_000, 1_500_000, 1_000_000, 500_000]
     N_sizes = [10000, 25000]
     orders = [1, 2]
     wds = [0.1, 0.01]
@@ -215,24 +195,35 @@ def main():
                 for order in orders:
                     print(f"\nEvaluating model with {num_parameters} parameters, N={N}, order={order}, weight decay={wd}")
                     
-                    continued_number = "continued_2" if num_parameters == 1_000_000 else "continued_3"
-                    if wd == 0.01:
-                        continued_number = 'light_wd'
                     # Load model and tokenizer
-                    model_path = get_project_root() / f"results/n{N}_p{num_parameters}_o{order}_{continued_number}/checkpoint-{args.checkpoint}"
-                    if not model_path.exists():
-                        print(f"Skipping {model_path} - path does not exist")
+                    parent_dir = filename_schemes(order, N, num_parameters, wd, args.finite)
+                    if not parent_dir:
                         continue
+
+                    if args.checkpoint == "latest":
+                        # Find all checkpoint directories
+                        checkpoints = [d for d in parent_dir.glob("checkpoint-*") if d.is_dir()]
+                        if not checkpoints:
+                            print(f"Skipping {parent_dir} - no checkpoints found")
+                            continue
+                        # Sort by checkpoint number and get the latest
+                        latest = max(checkpoints, key=lambda x: int(x.name.split("-")[1]))
+                        model_path = latest
+                    else:
+                        model_path = parent_dir / f"checkpoint-{args.checkpoint}"
+                    
+                    assert model_path.exists(), f"Model path does not exist: {model_path}"
+
                     model = AutoModelForCausalLM.from_pretrained(model_path).cuda()
-                    if num_parameters == 1_000_000:
+                    # Load datasets
+                    if num_parameters == 1_000_000 and args.finite:
                         tokenizer = AutoTokenizer.from_pretrained("meta-llama/Meta-Llama-3-8B")
+                        if N == 10000:
+                            bios_dataset = load_dataset("EleutherAI/transformer-reasoning-bios-dataset-10000", revision="a4029b437d3d96cb591d12b89b6c05bade648b9d")['train']
+                        else:
+                            bios_dataset = load_dataset(f"EleutherAI/transformer-reasoning-bios-dataset-{N}")['train']
                     else:
                         tokenizer = AutoTokenizer.from_pretrained("EleutherAI/pythia-160m")
-
-                    # Load datasets
-                    if N == 10000 and num_parameters == 1_000_000:
-                        bios_dataset = load_dataset("EleutherAI/transformer-reasoning-bios-dataset-10000", revision="a4029b437d3d96cb591d12b89b6c05bade648b9d")['train']
-                    else:
                         bios_dataset = load_dataset(f"EleutherAI/transformer-reasoning-bios-dataset-{N}")['train']
                     templates = load_templates(get_project_root() / "generated_data/templates")
                     qa_dataset = load_from_disk(str(get_project_root() / f"generated_data/qa_dataset_{N}")).filter(lambda x: x['questions.order'] <= 2)
@@ -262,15 +253,18 @@ def main():
                     # Process each bio
                     for bio in tqdm(sample_bios, desc="Processing bios"):
                         # Find variable positions
-                        matches = find_template_matches(bio, templates)
+                        bio_text = bio['bio']
+                        if not args.finite:
+                            bio_text = '<|endoftext|>' + bio_text
+
+                        matches = find_template_matches(bio, bio_text, templates)
                         if not matches:
                             continue
-
                         # Get token ranges for variables
-                        token_ranges = get_token_ranges(bio['bio'], tokenizer, matches)
+                        token_ranges = get_token_ranges(bio_text, tokenizer, matches)
                         
                         # Calculate losses
-                        losses = calculate_losses(model, tokenizer, bio['bio'], token_ranges)
+                        losses = calculate_losses(model, tokenizer, bio_text, token_ranges)
                         
                         # Aggregate losses
                         for attr, (first_loss, all_loss) in losses.items():
@@ -284,6 +278,8 @@ def main():
                     for qa in tqdm(sample_qa, desc="Processing QA"):
                         # Format QA text
                         text = f"Question: {qa['questions.question']} Answer: {qa['questions.answer']}"
+                        if not args.finite:
+                            text = "<|endoftext|>" + text
                         
                         # Get token ranges for answer
                         token_indices = get_qa_token_ranges(text, tokenizer)
@@ -328,26 +324,93 @@ def main():
 
     # Create plot
     plt.figure(figsize=(10, 6))
+    
+    # Define markers for different orders
+    order_markers = {1: 'o', 2: '^'}
+    
+    # Create fixed color map for parameter counts from 500k to 10M, log-spaced
+    all_param_sizes = np.logspace(np.log10(500_000), np.log10(10_000_000), 20)  # 20 discrete colors
+    param_colors = plt.cm.viridis(np.linspace(0, 1, len(all_param_sizes)))
+    
+    # Function to find closest predefined parameter size
+    def get_nearest_param_color(param_count):
+        idx = np.abs(all_param_sizes - param_count).argmin()
+        return param_colors[idx]
+    
     for result in results:
         bio_per_param = result['1hop_capacity'] / result['num_params']
         qa_per_param = result['qa_capacity_2'] / result['num_params']
         plt.scatter(bio_per_param, qa_per_param, 
+                   marker=order_markers[result['order']],
+                   color=get_nearest_param_color(result['num_params']),
                    label=f"N={result['N']}, params={result['num_params']}, order={result['order']}, wd={result['weight_decay']}")
 
     # Add reference line y = 2-x
     x = np.linspace(0, 2, 100)
     plt.plot(x, 2-x, '--', color='gray', label='y = 2-x')
 
-    plt.xlabel('Bio Capacity / Number of Parameters')
-    plt.ylabel('QA Capacity / Number of Parameters')
+    plt.xlabel('1 Hop Capacity / Number of Parameters')
+    plt.ylabel('2 hop Capacity / Number of Parameters')
     plt.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
-    plt.title('Normalized Bio Capacity vs QA Capacity')
+    plt.title('1 Hop vs 2 Hop Capacity')
     plt.grid(True)
     plt.tight_layout()
     
     # Save plot
-    plt.savefig(get_project_root() / 'results/capacity_plot.png', bbox_inches='tight')
+    plt.savefig(get_project_root() / f'results/capacity_plot_{args.finite}.png', bbox_inches='tight')
     plt.close()
+
+    # Create separate plots for each N value
+    for N in N_sizes:
+        plt.figure(figsize=(10, 6))
+        
+        # Filter results for this N
+        N_results = [r for r in results if r['N'] == N]
+        
+        # Calculate theoretical max capacities using calculate_capacities with zero losses
+        zero_losses = {
+            'name': [0.0, 0.0, 1],  # [first_token_loss, all_tokens_loss, count]
+            'birth_date': [0.0, 0.0, 1],
+            'birth_city': [0.0, 0.0, 1],
+            'university': [0.0, 0.0, 1],
+            'employer': [0.0, 0.0, 1],
+            'child': [0.0, 0.0, 1],
+            'best_friend': [0.0, 0.0, 1],
+            'worst_enemy': [0.0, 0.0, 1],
+            1: [0.0, 0.0, 1],  # For 1-hop QA
+            2: [0.0, 0.0, 1],  # For 2-hop QA
+        }
+        max_capacities, max_qa_2, max_qa_1 = calculate_capacities(zero_losses, profiles_dataset, N)
+        df = pd.DataFrame(results)
+        N_results = df[df['N'] == N]
+
+        # Plot unnormalized capacities
+        for _, result in N_results.iterrows():
+            plt.scatter(result['1hop_capacity'], result['qa_capacity_2'],
+                       marker=order_markers[result['order']],
+                       color=get_nearest_param_color(result['num_params']),
+                       label=f"params={result['num_params']}, order={result['order']}, wd={result['weight_decay']}")
+        
+        # Add reference lines for max capacities
+        plt.axvline(x=max_qa_1 + max_capacities['name'], color='gray', linestyle='--', alpha=0.5, 
+                   label=f'Max Bio Capacity ({(max_qa_1 + max_capacities["name"])/1e6:.1f}M)')
+        plt.axhline(y=max_qa_2, color='gray', linestyle='--', alpha=0.5,
+                   label=f'Max QA Capacity ({max_qa_2/1e6:.1f}M)')
+        
+        plt.xlabel('Bio Capacity (bits)')
+        plt.ylabel('QA Capacity (bits)')
+        plt.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
+        inf_str = "infinite" if not args.finite else "finite"
+        plt.title(f'Bio Capacity vs QA Capacity (N={N}, {inf_str} dataset)')
+        plt.grid(True)
+        plt.tight_layout()
+        
+        # Save plot
+        plt.savefig(get_project_root() / f'results/capacity_plot_N{N}_{args.finite}.png', bbox_inches='tight')
+        plt.close()
+
+    results_df = pd.DataFrame(results)
+    results_df.to_csv(get_project_root() / f'results/capacity_results_{args.finite}.csv', index=False)
 
 if __name__ == "__main__":
     main()
