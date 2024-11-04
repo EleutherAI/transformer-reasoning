@@ -15,12 +15,12 @@ from transformer_reasoning.generate_dataset.generate_qa_dataset import generate_
 from transformer_reasoning.utils import get_project_root
 
 class InfiniteBiosDataset(IterableDataset):
-    def __init__(self, profiles_dataset, tokenizer, max_seq_len=512, max_order=3, qa_prob=0.5, qa_indices = []):
+    def __init__(self, profiles_dataset, tokenizer, max_seq_len=512, orders=[1,2], qa_prob=0.5, qa_indices = []):
         self.profiles = profiles_dataset
         self.tokenizer = tokenizer
         self.max_seq_len = max_seq_len
-        self.samples_per_yield = max_seq_len//75
-        self.max_order = max_order
+        self.samples_per_yield = math.ceil((max_seq_len//75)*(1-qa_prob) + (max_seq_len//10)*qa_prob)
+        self.orders = orders
         self.qa_prob = qa_prob
         self.templates = load_templates(get_project_root() / "generated_data/templates")
         self.qa_indices = qa_indices
@@ -68,7 +68,7 @@ class InfiniteBiosDataset(IterableDataset):
     def generate_qa(self):
         profile_idx = random.choice(self.qa_indices)
         profile = self.profiles[profile_idx]
-        order = random.randrange(1, self.max_order + 1)
+        order = random.choice(self.orders)
         question, _ = generate_question(profile, self.profiles, order, {}, {})
         if question:
             return f"Question: {question['question']} Answer: {question['answer']}"

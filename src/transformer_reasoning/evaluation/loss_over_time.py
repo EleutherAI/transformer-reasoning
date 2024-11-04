@@ -190,9 +190,9 @@ def plot_losses(all_results: DataFrame, save_path: Optional[str] = None):
 def main():
     import argparse
     parser = argparse.ArgumentParser()
-    parser.add_argument("--num_checkpoints", type=int, default=15,
+    parser.add_argument("--num_checkpoints", type=int, default=10,
                        help="Number of checkpoints to evaluate")
-    parser.add_argument("--num_samples", type=int, default=1000,
+    parser.add_argument("--num_samples", type=int, default=500,
                        help="Number of samples to evaluate")
     
     args = parser.parse_args()

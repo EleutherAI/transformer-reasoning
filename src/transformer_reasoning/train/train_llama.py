@@ -18,7 +18,7 @@ import glob
 import os
 
 
-def load_and_prepare_datasets(tokenizer, subset_size=None, max_order=None, N=250000, qa_ratio=0.1):
+def load_and_prepare_datasets(tokenizer, subset_size=None, N=250000, qa_ratio=0.1, orders=None):
     # Load profiles dataset
     profiles = load_from_disk(str(get_project_root() / f"generated_data/profiles_dataset_{N}"))
     
@@ -31,7 +31,7 @@ def load_and_prepare_datasets(tokenizer, subset_size=None, max_order=None, N=250
     eval_questions = []
     
     for profile in heldout_profiles:
-        qa_result = generate_question(profile, profiles, max_order or 3, {}, {})
+        qa_result = generate_question(profile, profiles, max(orders) if orders else 3, {}, {})
         if qa_result:
             question, _ = qa_result
             eval_questions.append(question)
@@ -53,7 +53,7 @@ def load_and_prepare_datasets(tokenizer, subset_size=None, max_order=None, N=250
         profiles_dataset=profiles,
         tokenizer=tokenizer,
         max_seq_len=512,
-        max_order=max_order or 3,
+        orders=orders or [1,2],
         qa_prob=qa_ratio,
         qa_indices=retained_indices
     )
@@ -78,7 +78,7 @@ def main(args):
 
     # Load and prepare datasets
     if args.resume_from:
-        base_checkpoint_dir = str(get_project_root() / f"results/n{args.N}_p{args.num_params}_o{args.max_order}")
+        base_checkpoint_dir = str(get_project_root() / f"results/n{args.N}_p{args.num_params}_omin{min(args.orders)}_omax{max(args.orders)}")
         latest_checkpoint = max(glob.glob(os.path.join(base_checkpoint_dir, "checkpoint-*")), key=os.path.getctime)
         print(f"Loading model from checkpoint: {latest_checkpoint}")
         model = LlamaForCausalLM.from_pretrained(latest_checkpoint)
@@ -86,7 +86,7 @@ def main(args):
     else:
         model, tokenizer = create_model_and_tokenizer(args.num_params)
     train_dataset, heldout_dataset = load_and_prepare_datasets(
-        tokenizer, args.subset_size, args.max_order, args.N, args.qa_ratio
+        tokenizer, args.subset_size, args.N, args.qa_ratio, args.orders
     )
 
 
@@ -111,20 +111,20 @@ def main(args):
     print(f"Epochs: {epochs}")
     # Set up training arguments
     training_args = TrainingArguments(
-        output_dir=f"./results/n{args.N}_p{args.num_params}_o{args.max_order}_wd{args.wd}_infinite",
+        output_dir=f"./results/n{args.N}_p{args.num_params}_omin{min(args.orders)}_omax{max(args.orders)}_wd{args.wd}_infinite",
         num_train_epochs=epochs,
         per_device_train_batch_size=16,
         per_device_eval_batch_size=16,
         eval_accumulation_steps=1,
         warmup_steps=500,
         weight_decay=args.wd,
-        logging_dir=f"./logs/n{args.N}_p{args.num_params}_o{args.max_order}_wd{args.wd}_infinite",
+        logging_dir=f"./logs/n{args.N}_p{args.num_params}_omin{min(args.orders)}_omax{max(args.orders)}_wd{args.wd}_infinite",
         logging_steps=100,
         evaluation_strategy="steps",
         eval_steps=20000,
         save_steps=20000,
         load_best_model_at_end=True,
-        dataloader_num_workers=4,
+        dataloader_num_workers=0,
         fp16=True,
         tf32=True,
     )
@@ -149,15 +149,15 @@ def main(args):
     print("Heldout Profiles Results:", heldout_results)
 
     # Save the model
-    model.save_pretrained(f"./final_model_n{args.N}_p{args.num_params}_o{args.max_order}_wd{args.wd}")
-    tokenizer.save_pretrained(f"./final_model_n{args.N}_p{args.num_params}_o{args.max_order}_wd{args.wd}")
+    model.save_pretrained(f"./final_model_n{args.N}_p{args.num_params}_omin{min(args.orders)}_omax{max(args.orders)}_wd{args.wd}")
+    tokenizer.save_pretrained(f"./final_model_n{args.N}_p{args.num_params}_omin{min(args.orders)}_omax{max(args.orders)}_wd{args.wd}")
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Train a Llama model with specified parameters")
     parser.add_argument("--num_params", type=int, default=1_000_000, help="Number of parameters for the model")
     parser.add_argument("--subset_size", type=int, default=None, help="Number of examples to use for training (for testing purposes)")
     parser.add_argument("--N", type=int, default=25000, help="Number of profiles to use for QA dataset")
-    parser.add_argument("--max_order", type=int, default=None, help="Maximum order of qa dataset")
+    parser.add_argument("--orders", type=int, nargs="+", default=None, help="Orders to use for QA dataset")
     parser.add_argument("--resume_from", action="store_true", help="Resume training from most recent checkpoint")
     parser.add_argument("--qa_ratio", type=float, default=0.5,
                        help="Ratio of QA examples to bios examples")
