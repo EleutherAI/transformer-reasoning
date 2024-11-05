@@ -9,13 +9,11 @@ from transformers import (
     DataCollatorForLanguageModeling,
 )
 from datasets import load_dataset
-from transformer_reasoning.utils import get_project_root
-from transformer_reasoning.train.train_utils import calculate_model_size, create_model_and_tokenizer, InfiniteBiosDataset
+from transformer_reasoning.train.train_utils import calculate_model_size, create_model_and_tokenizer, InfiniteBiosDataset, LogConstantCheckpointCallback
 from transformer_reasoning.generate_dataset.generate_qa_dataset import generate_question
 
 from datasets import Dataset
-import glob
-import os
+
 
 
 def load_and_prepare_datasets(tokenizer, subset_size=None, N=250000, qa_ratio=0.1, orders=None):
@@ -106,16 +104,16 @@ def main(args):
         return torch.cat(selected_logits, dim=0)
 
     # This is the number of times we step through each profiles; the "dataset size" is infinite
-    epochs = 5_000*25000/len(train_dataset)
+    epochs = 4_500*25000/len(train_dataset)
     print(f"Epochs: {epochs}")
     # Set up training arguments
     training_args = TrainingArguments(
         output_dir=f"./results/n{args.N}_p{args.num_params}_omin{min(args.orders)}_omax{max(args.orders)}_wd{args.wd}_infinite",
         num_train_epochs=epochs,
-        per_device_train_batch_size=16,
+        per_device_train_batch_size=args.train_batch_size,
         per_device_eval_batch_size=16,
         eval_accumulation_steps=1,
-        gradient_accumulation_steps=2,
+        gradient_accumulation_steps=int(max(1, args.train_batch_size//32)),
         warmup_steps=500,
         weight_decay=args.wd,
         logging_dir=f"./logs/n{args.N}_p{args.num_params}_omin{min(args.orders)}_omax{max(args.orders)}_wd{args.wd}_infinite",
@@ -123,10 +121,13 @@ def main(args):
         evaluation_strategy="steps",
         eval_steps=20000,
         save_steps=20000,
-        load_best_model_at_end=True,
         dataloader_num_workers=0,
         fp16=True,
         tf32=True,
+        hub_strategy="every_save",
+        hub_model_id=f"EleutherAI/llama_multihop_n{args.N}_p{args.num_params}_omin{min(args.orders)}_omax{max(args.orders)}_wd{args.wd}",
+        push_to_hub=args.push_to_hub,
+        save_strategy="no"
     )
 
     trainer = Trainer(
@@ -138,6 +139,8 @@ def main(args):
         data_collator=DataCollatorForLanguageModeling(tokenizer=tokenizer, mlm=False),
         preprocess_logits_for_metrics=preprocess_logits_for_metrics,
     )
+
+    trainer.add_callback(LogConstantCheckpointCallback(trainer))
 
     if args.resume_from:
         trainer.train(resume_from_checkpoint=latest_checkpoint)
@@ -162,6 +165,8 @@ if __name__ == "__main__":
     parser.add_argument("--qa_ratio", type=float, default=0.5,
                        help="Ratio of QA examples to bios examples")
     parser.add_argument("--wd", type=float, default=0.01, help="Weight decay")
+    parser.add_argument("--push_to_hub", action="store_true", help="Push trained model to hf hub")
+    parser.add_argument("--train_batch_size", type=int, default=16, help="Batch size for training")
     args = parser.parse_args()
     
     main(args)

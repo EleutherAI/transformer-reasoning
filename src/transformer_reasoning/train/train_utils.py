@@ -1,7 +1,10 @@
 import math
-from transformers import LlamaForCausalLM, LlamaConfig, AutoTokenizer
-
-from transformers import PreTrainedTokenizerBase
+from transformers import (
+    LlamaForCausalLM, LlamaConfig, 
+    AutoTokenizer, TrainerCallback, 
+    PreTrainedTokenizerBase
+)
+import torch
 
 from typing import TypeVar, Union
 from datasets import Dataset, DatasetDict
@@ -13,6 +16,21 @@ import random
 from transformer_reasoning.generate_dataset.generate_bios import generate_bio, load_templates
 from transformer_reasoning.generate_dataset.generate_qa_dataset import generate_question
 from transformer_reasoning.utils import get_project_root
+
+
+class LogConstantCheckpointCallback(TrainerCallback):
+    def __init__(self, trainer):
+        # Generate log-spaced steps until 20k
+        self.early_saves = set([int(math.exp(i)) for i in torch.linspace(math.log(100), math.log(20000), 10).tolist()])
+        
+    def on_step_end(self, args, state, control, **kwargs):
+        step = state.global_step
+        if step < 20000 and step in self.early_saves:
+            control.should_save = True
+            breakpoint()
+        elif step >= 20000 and step % 20000 == 0:
+            control.should_save = True
+        return control
 
 class InfiniteBiosDataset(IterableDataset):
     def __init__(self, profiles_dataset, tokenizer, max_seq_len=512, orders=[1,2], qa_prob=0.5, qa_indices = []):
