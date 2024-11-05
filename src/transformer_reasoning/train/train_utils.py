@@ -27,7 +27,6 @@ class LogConstantCheckpointCallback(TrainerCallback):
         step = state.global_step
         if step < 20000 and step in self.early_saves:
             control.should_save = True
-            breakpoint()
         elif step >= 20000 and step % 20000 == 0:
             control.should_save = True
         return control
