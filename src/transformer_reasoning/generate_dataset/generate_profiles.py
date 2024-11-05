@@ -144,8 +144,11 @@ chosen_params = Features({
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Generate profiles dataset")
     parser.add_argument("N", type=int, help="Number of profiles to generate")
+    parser.add_argument("--push_to_hub", action="store_true", help="Push to hub")
     args = parser.parse_args()
 
     N = args.N
     dataset = Dataset.from_generator(generate_profiles, features=chosen_params)
     dataset.save_to_disk(str(get_project_root() / f"generated_data/profiles_dataset_{N}"))
+    if args.push_to_hub:
+        dataset.push_to_hub(f"EleutherAI/profiles_dataset_{N}")

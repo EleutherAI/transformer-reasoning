@@ -8,7 +8,7 @@ from transformers import (
     Trainer,
     DataCollatorForLanguageModeling,
 )
-from datasets import load_from_disk
+from datasets import load_dataset
 from transformer_reasoning.utils import get_project_root
 from transformer_reasoning.train.train_utils import calculate_model_size, create_model_and_tokenizer, InfiniteBiosDataset
 from transformer_reasoning.generate_dataset.generate_qa_dataset import generate_question
@@ -20,7 +20,7 @@ import os
 
 def load_and_prepare_datasets(tokenizer, subset_size=None, N=250000, qa_ratio=0.1, orders=None):
     # Load profiles dataset
-    profiles = load_from_disk(str(get_project_root() / f"generated_data/profiles_dataset_{N}"))
+    profiles = load_dataset(f"EleutherAI/profiles_dataset_{N}")
     
     shuffled_indices = torch.randperm(len(profiles)).tolist()
     heldout_indices = shuffled_indices[:1000]
@@ -78,8 +78,7 @@ def main(args):
 
     # Load and prepare datasets
     if args.resume_from:
-        base_checkpoint_dir = str(get_project_root() / f"results/n{args.N}_p{args.num_params}_omin{min(args.orders)}_omax{max(args.orders)}")
-        latest_checkpoint = max(glob.glob(os.path.join(base_checkpoint_dir, "checkpoint-*")), key=os.path.getctime)
+        latest_checkpoint = args.resume_from
         print(f"Loading model from checkpoint: {latest_checkpoint}")
         model = LlamaForCausalLM.from_pretrained(latest_checkpoint)
         tokenizer = AutoTokenizer.from_pretrained(latest_checkpoint)
@@ -116,6 +115,7 @@ def main(args):
         per_device_train_batch_size=16,
         per_device_eval_batch_size=16,
         eval_accumulation_steps=1,
+        gradient_accumulation_steps=2,
         warmup_steps=500,
         weight_decay=args.wd,
         logging_dir=f"./logs/n{args.N}_p{args.num_params}_omin{min(args.orders)}_omax{max(args.orders)}_wd{args.wd}_infinite",
@@ -158,7 +158,7 @@ if __name__ == "__main__":
     parser.add_argument("--subset_size", type=int, default=None, help="Number of examples to use for training (for testing purposes)")
     parser.add_argument("--N", type=int, default=25000, help="Number of profiles to use for QA dataset")
     parser.add_argument("--orders", type=int, nargs="+", default=None, help="Orders to use for QA dataset")
-    parser.add_argument("--resume_from", action="store_true", help="Resume training from most recent checkpoint")
+    parser.add_argument("--resume_from", type=str, default=None, help="Resume training from given checkpoint")
     parser.add_argument("--qa_ratio", type=float, default=0.5,
                        help="Ratio of QA examples to bios examples")
     parser.add_argument("--wd", type=float, default=0.01, help="Weight decay")
