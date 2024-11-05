@@ -13,7 +13,8 @@ from transformer_reasoning.train.train_utils import calculate_model_size, create
 from transformer_reasoning.generate_dataset.generate_qa_dataset import generate_question
 
 from datasets import Dataset
-
+import glob
+import os
 
 
 def load_and_prepare_datasets(tokenizer, subset_size=None, N=250000, qa_ratio=0.1, orders=None):
@@ -76,7 +77,9 @@ def main(args):
 
     # Load and prepare datasets
     if args.resume_from:
-        latest_checkpoint = args.resume_from
+        base_dir = args.resume_from
+        checkpoints = glob.glob(os.path.join(base_dir, "checkpoint-*"))
+        latest_checkpoint = sorted(checkpoints, key=lambda x: int(x.split("-")[-1]))[-1]
         print(f"Loading model from checkpoint: {latest_checkpoint}")
         model = LlamaForCausalLM.from_pretrained(latest_checkpoint)
         tokenizer = AutoTokenizer.from_pretrained(latest_checkpoint)
@@ -152,8 +155,8 @@ def main(args):
     print("Heldout Profiles Results:", heldout_results)
 
     # Save the model
-    model.save_pretrained(f"./final_model_n{args.N}_p{args.num_params}_omin{min(args.orders)}_omax{max(args.orders)}_wd{args.wd}")
-    tokenizer.save_pretrained(f"./final_model_n{args.N}_p{args.num_params}_omin{min(args.orders)}_omax{max(args.orders)}_wd{args.wd}")
+    model.save_pretrained(f"./final_model/n{args.N}_p{args.num_params}_omin{min(args.orders)}_omax{max(args.orders)}_wd{args.wd}")
+    tokenizer.save_pretrained(f"./final_model/n{args.N}_p{args.num_params}_omin{min(args.orders)}_omax{max(args.orders)}_wd{args.wd}")
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Train a Llama model with specified parameters")
