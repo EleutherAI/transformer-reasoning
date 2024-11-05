@@ -20,7 +20,7 @@ import os
 
 def load_and_prepare_datasets(tokenizer, subset_size=None, N=250000, qa_ratio=0.1, orders=None):
     # Load profiles dataset
-    profiles = load_dataset(f"EleutherAI/profiles_dataset_{N}")
+    profiles = load_dataset(f"EleutherAI/profiles_dataset_{N}")['train']
     
     shuffled_indices = torch.randperm(len(profiles)).tolist()
     heldout_indices = shuffled_indices[:1000]
