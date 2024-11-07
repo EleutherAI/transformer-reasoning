@@ -33,6 +33,10 @@ def generate_question(profile: Dict, profiles: Dataset, order: int, holdout_subj
         subject = random.choice(available_subjects)
         chosen_subject = subject
         question = FIRST_ORDER_TEMPLATE.format(name=name, subject=subject.replace('_', ' '))
+        if subject in RELATIONS:
+            answer = profile[subject]['name']
+        else:
+            answer = profile[subject]
     elif order == 2:
         if not available_relations or not available_subjects:
             return None
@@ -43,35 +47,34 @@ def generate_question(profile: Dict, profiles: Dataset, order: int, holdout_subj
         subject = random.choice(available_subjects)
         chosen_subject = subject
         chosen_relations[1] = relation
-        question = SECOND_ORDER_TEMPLATE.format(name=related_profile['name'], relation=INVERSE_RELATIONS[relation].replace('_', ' '), subject=subject.replace('_', ' '))
-        assert profiles[profile[relation]['index']]['name'] == related_profile['name']
-        assert profiles[related_profile[INVERSE_RELATIONS[relation]]['index']]['name'] == name
+        question = SECOND_ORDER_TEMPLATE.format(name=profile['name'], relation=relation.replace('_', ' '), subject=subject.replace('_', ' '))
+        if subject in RELATIONS:
+            answer = related_profile[subject]['name']
+        else:
+            answer = related_profile[subject]
+        assert profile[relation]['name'] == related_profile['name']
     else:  # order == 3
         if len(available_relations) < 2 or not available_subjects:
             return None
-        relation2 = random.choice([INVERSE_RELATIONS[rel] for rel in available_relations])
-        # Double inverse is the same relation; circular relations accepted
         relation1 = random.choice([rel for rel in available_relations])
+        # Double inverse is the same relation; circular relations accepted
+        relation2 = random.choice([rel for rel in available_relations])
         subject = random.choice(available_subjects)
-        related_profile2 = profiles[profile[relation2]['index']]
-        related_profile1 = profiles[related_profile2[relation1]['index']]
+        related_profile1 = profiles[profile[relation1]['index']]
+        related_profile2 = profiles[related_profile1[relation2]['index']]
         if profile[relation2]['index']==-1 or related_profile2[relation1]['index']==-1:
             return None
-        question = THIRD_ORDER_TEMPLATE.format(name=related_profile1['name'], relation1=INVERSE_RELATIONS[relation1].replace('_', ' '), 
-                                        relation2=INVERSE_RELATIONS[relation2].replace('_', ' '), subject=subject.replace('_', ' '))
-
+        question = THIRD_ORDER_TEMPLATE.format(name=profile['name'], relation1=relation1.replace('_', ' '), 
+                                        relation2=relation2.replace('_', ' '), subject=subject.replace('_', ' '))
         chosen_subject = subject
         chosen_relations[1] = relation1
         chosen_relations[2] = relation2
-        assert related_profile1['name'] == related_profile2[relation1]['name']
-        assert related_profile2['name'] == related_profile1[INVERSE_RELATIONS[relation1]]['name']
-        assert related_profile2['name'] == profile[relation2]['name']
-        assert profile['name'] == related_profile2[INVERSE_RELATIONS[relation2]]['name']
-    
-    if subject in RELATIONS:
-        answer = profile[subject]['name']
-    else:
-        answer = profile[subject]
+        if subject in RELATIONS:
+            answer = related_profile2[subject]['name']
+        else:
+            answer = related_profile2[subject]
+        assert related_profile1['name'] == profile[relation1]['name']
+        assert related_profile2['name'] == related_profile1[relation2]['name']
     
     if isinstance(answer, datetime.date):
         answer = answer.strftime('%Y-%m-%d')

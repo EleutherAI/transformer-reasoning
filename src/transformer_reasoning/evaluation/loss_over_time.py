@@ -29,18 +29,20 @@ def get_checkpoint_paths(model_dir: str, num_checkpoints: int = 20) -> List[Path
 
 def evaluate_checkpoints(
     N: int,
-    order: int,
+    min_order: int,
+    max_order: int,
     params: int,
     wd: float,
-    finite: bool,
-    num_checkpoints: int = 15,
-    num_samples: int = 10000
+    finite: bool = False,
+    old: bool = False,
+    num_checkpoints: int = 10,
+    num_samples: int = 5000
 ) -> Dict[str, List[float]]:
     """Evaluate loss for different tasks across checkpoints."""
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
 
-    model_dir = filename_schemes(order, N, params, wd, finite)
+    model_dir = filename_schemes(min_order, max_order, N, params, wd, old, finite)
     if not model_dir:
         return None
     checkpoint_paths = get_checkpoint_paths(model_dir, num_checkpoints)
@@ -56,7 +58,7 @@ def evaluate_checkpoints(
         else:
             bios_dataset = load_dataset(f"EleutherAI/transformer-reasoning-bios-dataset-{N}")['train']
     else:
-        tokenizer = AutoTokenizer.from_pretrained("EleutherAI/pythia-160m")
+        tokenizer = AutoTokenizer.from_pretrained("EleutherAI/llama_multihop_tokenizer")
         bios_dataset = load_dataset(f"EleutherAI/transformer-reasoning-bios-dataset-{N}")['train']
         insert_eos = True
     tokenizer.pad_token = tokenizer.eos_token
@@ -80,7 +82,8 @@ def evaluate_checkpoints(
         "bio_loss": [],
         "qa_1hop_loss": [],
         "qa_2hop_loss": [],
-        "model_hops": [],
+        "model_min_hops": [],
+        "model_max_hops": [],
         "model_params": [],
         "model_wd": [],
         "dataset_N": [],
@@ -104,7 +107,8 @@ def evaluate_checkpoints(
         results["bio_loss"].append(bio_loss)
         results["qa_1hop_loss"].append(qa_1hop_loss)
         results["qa_2hop_loss"].append(qa_2hop_loss)
-        results["model_hops"].append(order)
+        results["model_min_hops"].append(min_order)
+        results["model_max_hops"].append(max_order)
         results["model_params"].append(params)
         results["model_wd"].append(wd)
         results["dataset_N"].append(N)
@@ -118,7 +122,7 @@ def evaluate_checkpoints(
 
 def plot_losses(all_results: DataFrame, save_path: Optional[str] = None):
     """Plot losses over training steps in a grid of subplots."""
-    orders = sorted(all_results['model_hops'].unique())
+    orders = [(1,1), (1,2), (2,2)]
     hops = [1, 2]  # 1-hop and 2-hop
     
     # Create figure with subplots
@@ -134,12 +138,13 @@ def plot_losses(all_results: DataFrame, save_path: Optional[str] = None):
     param_range = all_results['model_params'].unique()
     norm = LogNorm(vmin=min(param_range), vmax=max(param_range))
     
-    for i, order in enumerate(orders):
+    for i, (min_order, max_order) in enumerate(orders):
         for j, hop in enumerate(hops):
             ax = axes[i, j]
             
             # Filter results for this order
-            order_results = all_results[all_results['model_hops'] == order]
+            order_results = all_results[all_results['model_min_hops'] == min_order]
+            order_results = order_results[order_results['model_max_hops'] == max_order]
             
             # Plot appropriate loss line
             loss_key = f"qa_{hop}hop_loss" if hop > 0 else "bio_loss"
@@ -163,9 +168,13 @@ def plot_losses(all_results: DataFrame, save_path: Optional[str] = None):
             if i == 0:
                 ax.set_title(f"{hop}-hop QA" if hop > 0 else "Biographical")
             if j == 0:
-                ax.set_ylabel(f"Order {order}\nLoss")
+                ax.set_ylabel(f"Min train hops {min_order}, max train hops {max_order}\nLoss")
             if i == len(orders) - 1:
                 ax.set_xlabel("Training Steps")
+            
+            # Set y-axis to log scale and fix limits
+            ax.set_yscale('log')
+            ax.set_ylim(5e-3, 5.5)
             
             ax.grid(True)
     
@@ -194,12 +203,15 @@ def main():
                        help="Number of checkpoints to evaluate")
     parser.add_argument("--num_samples", type=int, default=500,
                        help="Number of samples to evaluate")
+    parser.add_argument("--old", action="store_true",
+                       help="Use old checkpoints with different filename scheme")
     
     args = parser.parse_args()
     
+    newness = "old" if args.old else "new"
 
     for N in [10000, 25000]:
-        csv_path = get_project_root() / f"results/loss_over_time_{N}.csv"
+        csv_path = get_project_root() / f"results/loss_over_time_{N}_{newness}.csv"
         
         if csv_path.exists():
             # Load existing results
@@ -207,23 +219,25 @@ def main():
         else:
             # Calculate new results
             results = []
-            for order in [1, 2]:
-                for params in [500_000, 1_000_000, 1_500_000, 2_000_000, 5_000_000]:
-                    for wd in [0.01, 0.1]:
-                        for finite in [True, False]:
-                            results.append(evaluate_checkpoints(
-                                N=N,
-                                order=order,
-                                params=params,
-                                wd=wd,
-                                finite=finite,
-                                num_checkpoints=args.num_checkpoints,
-                                num_samples=args.num_samples
-                            ))
+            for min_order in [1, 2]:
+                for max_order in range(min_order, 3):
+                    for params in [200_000, 300_000, 500_000, 800_000, 1_000_000, 1_500_000, 2_000_000, 5_000_000]:
+                        for wd in [0.01, 0.1]:
+                                results.append(evaluate_checkpoints(
+                                    N=N,
+                                    min_order=min_order,
+                                    max_order=max_order,
+                                    params=params,
+                                    wd=wd,
+                                    num_checkpoints=args.num_checkpoints,
+                                    num_samples=args.num_samples,
+                                    old=args.old
+                                ))
             results_df = pd.concat([pd.DataFrame(r) for r in results])
 
-        save_path = get_project_root() / f"results/loss_over_time_{N}.png"
-        plot_losses(results_df, save_path)
+        if len(results_df) > 0:
+            save_path = get_project_root() / f"results/loss_over_time_{N}_{newness}.png"
+            plot_losses(results_df, save_path)
 
 if __name__ == "__main__":
     main()

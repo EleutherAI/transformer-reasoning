@@ -44,7 +44,6 @@ def evaluate_qa_loss(model: torch.nn.Module, tokenizer: PreTrainedTokenizer, dat
     # Use random.sample instead of torch.randperm
     indices = random.sample(range(len(dataset)), num_samples)
     
-    
     for item in tqdm([dataset[i] for i in indices], desc="Evaluating QA loss"):
         text = f"Question: {item['questions.question']} Answer: {item['questions.answer']}"
         if insert_eos:
@@ -86,7 +85,7 @@ def get_qa_token_ranges(text: str, tokenizer) -> List[int]:
         prefix_tokens = prefix_tokens[:-1]
 
     # Answer tokens are between these lengths
-    return list(range(len(prefix_tokens)-1, len(full_tokens)-1))
+    return list(range(len(prefix_tokens)-1, len(full_tokens)))
 
 def get_token_ranges(text: str, tokenizer, matches: List[Tuple[str, str, int, int]]) -> List[Tuple[str, List[int]]]:
     """

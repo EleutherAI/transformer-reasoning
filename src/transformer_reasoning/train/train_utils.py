@@ -11,10 +11,12 @@ from datasets import Dataset, DatasetDict
 from multiprocessing import cpu_count
 T = TypeVar("T", bound=Union[Dataset, DatasetDict])
 
+
 from torch.utils.data import IterableDataset, DataLoader
 import random
 from transformer_reasoning.generate_dataset.generate_bios import generate_bio, load_templates
 from transformer_reasoning.generate_dataset.generate_qa_dataset import generate_question
+from transformer_reasoning.evaluation.eval_utils import get_qa_token_ranges
 from transformer_reasoning.utils import get_project_root
 
 
@@ -27,8 +29,10 @@ class LogConstantCheckpointCallback(TrainerCallback):
         step = state.global_step
         if step < 20000 and step in self.early_saves:
             control.should_save = True
+            control.should_evaluate = True
         elif step >= 20000 and step % 20000 == 0:
             control.should_save = True
+            control.should_evaluate = True
         return control
 
 class InfiniteBiosDataset(IterableDataset):
@@ -41,29 +45,42 @@ class InfiniteBiosDataset(IterableDataset):
         self.qa_prob = qa_prob
         self.templates = load_templates(get_project_root() / "generated_data/templates")
         self.qa_indices = qa_indices
+        self.order_weights = [10**i for i in range(len(orders))]
 
     def __len__(self):
         return len(self.profiles)
 
     def __iter__(self):
-        while True:  # Infinite iteration
+        steps = 0
+        while steps < len(self.profiles):  # Stop after one "epoch"
+            # But the next epoch will yield different samples
             # Generate multiple samples (either bios or QA)
             texts = []
+            answer_token_ranges = []
+            
             for _ in range(self.samples_per_yield):
                 if random.random() < self.qa_prob:
                     if question := self.generate_qa():
                         texts.append(question)
+                        # Calculate answer ranges only if tokenizer exists
+                        if self.tokenizer:
+                            answer_token_ranges.append(get_qa_token_ranges(question, self.tokenizer))
                 else:
                     # Generate bio
                     profile_idx = random.randrange(len(self.profiles))
                     profile = self.profiles[profile_idx]
                     texts.append(generate_bio(profile, self.templates))
+                    if self.tokenizer:
+                        answer_token_ranges.append(list(range(len(texts))))
             
-            # Join texts with separator token
+            # If no tokenizer provided, just return the text chunk
+            if self.tokenizer is None:
+                yield {"text": "\n".join(texts)}
+                continue
+            
+            # Tokenizer-dependent processing
             sep = self.tokenizer.eos_token or "<|endoftext|>"
-            joined_text = sep.join([""] + texts)  # Start with separator
-            
-            # Tokenize and chunk
+            joined_text = sep.join(texts)  # Start with separator
             output = self.tokenizer(
                 joined_text,
                 max_length=self.max_seq_len,
@@ -71,21 +88,47 @@ class InfiniteBiosDataset(IterableDataset):
                 return_overflowing_tokens=True,
                 truncation=True,
             )
+            # First tokenize each text and create its labels
+            individual_labels = []
+            for i, at_range in enumerate(answer_token_ranges):
+                labels = [-100] * (at_range[-1] + 1)
+                labels[at_range[0]:] = [1] * (len(labels) - at_range[0])
+                individual_labels.extend(labels)
+            
+            # Insert sep tokens at max_seq_len intervals
+            sep_tokens = self.tokenizer(sep, return_attention_mask=False, add_special_tokens=False)["input_ids"]
+            final_labels = []
+            for i in range(0, len(individual_labels), self.max_seq_len):
+                if i > 0:  # Add separator at the start of each chunk except first
+                    final_labels.extend([-100] * len(sep_tokens))
+                final_labels.extend(individual_labels[i:i + self.max_seq_len])
+            
+            # Split into chunks
+            chunked_labels = [final_labels[i:i + self.max_seq_len] 
+                            for i in range(0, len(final_labels), self.max_seq_len)]
+            
+            for j, (labels_chunk, ids_chunk) in enumerate(zip(chunked_labels, output["input_ids"])):
+                for i, (l, id) in enumerate(zip(labels_chunk, ids_chunk)):
+                    if l == 1:
+                        chunked_labels[j][i] = id
+            
             # Handle overflow tokens
             if overflow := output.pop("overflow_to_sample_mapping", None):
-                # Yield all chunks except possibly incomplete last one
-                for ids in output["input_ids"][:-1]:
-                    yield {"input_ids": ids, "text": joined_text}
+                for i, ids in enumerate(output["input_ids"][:-1]):
+                    steps += 1
+                    if steps >= len(self.profiles):
+                        break
+                    yield {"input_ids": ids, "text": joined_text, "labels": chunked_labels[i]}
             else:
-                # If no overflow, yield the single chunk if it's full
                 if len(output["input_ids"][0]) == self.max_seq_len:
-                    yield {"input_ids": output["input_ids"], "text": joined_text}
+                    steps += 1
+                    yield {"input_ids": output["input_ids"], "text": joined_text, "labels": chunked_labels}
 
 
     def generate_qa(self):
         profile_idx = random.choice(self.qa_indices)
         profile = self.profiles[profile_idx]
-        order = random.choice(self.orders)
+        order = random.choices(self.orders, weights=self.order_weights, k=1)[0]
         question, _ = generate_question(profile, self.profiles, order, {}, {})
         if question:
             return f"Question: {question['question']} Answer: {question['answer']}"
@@ -95,17 +138,17 @@ class InfiniteBiosDataset(IterableDataset):
 def calculate_model_size(num_params):
     return num_params * 4 / (1024 * 1024)  # Size in MB
 
-def calculate_architecture(num_params):
-    n_layers = int(math.log(num_params / 1e6, 2)) + 4
-    hidden_size = int(math.sqrt(num_params / (n_layers * 4)))
-    hidden_size = (hidden_size // 64) * 64  # Round to nearest multiple of 64
+def calculate_architecture(num_params, n_layers=4):
+    resid_params = num_params - 10_000*32
+    hidden_size = int(math.sqrt(resid_params / (n_layers * 12)))
+    hidden_size = max(1, (hidden_size // 16)) * 16  # Round to nearest multiple of 16
     return n_layers, hidden_size
 
 
 def create_model_and_tokenizer(num_params):
     n_layers, hidden_size = calculate_architecture(num_params)
     
-    tokenizer = AutoTokenizer.from_pretrained("EleutherAI/pythia-160m")
+    tokenizer = AutoTokenizer.from_pretrained("EleutherAI/llama_multihop_tokenizer")
     tokenizer.pad_token = tokenizer.eos_token
 
     config = LlamaConfig(
@@ -113,13 +156,16 @@ def create_model_and_tokenizer(num_params):
         hidden_size=hidden_size,
         intermediate_size=hidden_size * 4,
         num_hidden_layers=n_layers,
-        num_attention_heads=hidden_size // 64,
+        num_attention_heads=hidden_size // 16,
         max_position_embeddings=2048,
     )
     
     model = LlamaForCausalLM(config)
     
-    return model, tokenizer
+    real_num_params = sum(p.numel() for p in model.parameters()) 
+    print(f"Model has {real_num_params} parameters")
+
+    return model, tokenizer, real_num_params
     
 def chunk_and_tokenize(
     data: T,

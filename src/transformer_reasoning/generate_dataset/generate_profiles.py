@@ -60,7 +60,12 @@ def partition_names(names: List[str]) -> Tuple[List[str], List[str], List[str], 
     
     return parents, children, names.copy(), names.copy()
 
-def create_relationships(parents: List[str], children: List[str], friend_pool: List[str], enemy_pool: List[str]) -> Tuple[Dict[str, Dict[str, Dict[str, Union[str, int]]]], Dict[str, int]]:
+def create_bipartite_relationships(
+        parents: List[str], 
+        children: List[str], 
+        friend_pool: List[str], 
+        enemy_pool: List[str]
+    ) -> Tuple[Dict[str, Dict[str, Dict[str, Union[str, int]]]], Dict[str, int]]:
     relationships = {}
     name_to_index = {}
     
@@ -92,11 +97,26 @@ def create_relationships(parents: List[str], children: List[str], friend_pool: L
     
     return relationships, name_to_index
 
+def create_uniform_relationships(names: List[str]) -> Dict[str, Dict[str, Dict[str, Union[str, int]]]]:
+    relationships = {name: {} for name in names}
+    name_to_index = {name: i for i, name in enumerate(names)}
+
+    for i, name in enumerate(names):
+        for rel_type in ["parent", "child", "best_friend", "worst_enemy"]:
+            random_index = random.randint(0, len(names) - 1)
+            relationships[name][rel_type] = {"name": names[random_index], "index": name_to_index[names[random_index]]}
+
+    return relationships, name_to_index
+
 def generate_profiles():
     global N
+    global bipartite
     all_names = generate_all_names(N)
     parents, children, friend_pool, enemy_pool = partition_names(all_names)
-    relationships, name_to_index = create_relationships(parents, children, friend_pool, enemy_pool)
+    if bipartite:
+        relationships, name_to_index = create_bipartite_relationships(parents, children, friend_pool, enemy_pool)
+    else:
+        relationships, name_to_index = create_uniform_relationships(all_names)
 
     for name in all_names:
         profile = {
@@ -143,12 +163,16 @@ chosen_params = Features({
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Generate profiles dataset")
-    parser.add_argument("N", type=int, help="Number of profiles to generate")
+    parser.add_argument("--N", type=int, help="Number of profiles to generate")
+    parser.add_argument("--bipartite", action="store_true", help="Use bipartite relationships")
     parser.add_argument("--push_to_hub", action="store_true", help="Push to hub")
     args = parser.parse_args()
 
+    rel_type = "bipartite" if args.bipartite else "uniform"
+
     N = args.N
+    bipartite = args.bipartite
     dataset = Dataset.from_generator(generate_profiles, features=chosen_params)
-    dataset.save_to_disk(str(get_project_root() / f"generated_data/profiles_dataset_{N}"))
+    dataset.save_to_disk(str(get_project_root() / f"generated_data/profiles_dataset_{N}_{rel_type}"))
     if args.push_to_hub:
-        dataset.push_to_hub(f"EleutherAI/profiles_dataset_{N}")
+        dataset.push_to_hub(f"EleutherAI/profiles_dataset_{N}_{rel_type}")

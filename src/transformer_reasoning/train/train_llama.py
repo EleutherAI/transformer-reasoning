@@ -19,11 +19,11 @@ import os
 
 def load_and_prepare_datasets(tokenizer, subset_size=None, N=250000, qa_ratio=0.1, orders=None):
     # Load profiles dataset
-    profiles = load_dataset(f"EleutherAI/profiles_dataset_{N}")['train']
+    profiles = load_dataset(f"EleutherAI/profiles_dataset_{N}_uniform")['train']
     
     shuffled_indices = torch.randperm(len(profiles)).tolist()
-    heldout_indices = shuffled_indices[:1000]
-    retained_indices = shuffled_indices[1000:]
+    heldout_indices = shuffled_indices[:100]
+    retained_indices = shuffled_indices[100:]
 
     # Generate QA dataset for evaluation from the heldout profiles
     heldout_profiles = profiles.select(heldout_indices)
@@ -72,9 +72,6 @@ def find_question_end(text, tokenizer):
 
 
 def main(args):
-    model_size_mb = calculate_model_size(args.num_params)
-    print(f"Estimated model size: {model_size_mb:.2f} MB")
-
     # Load and prepare datasets
     if args.resume_from:
         base_dir = args.resume_from
@@ -83,11 +80,15 @@ def main(args):
         print(f"Loading model from checkpoint: {latest_checkpoint}")
         model = LlamaForCausalLM.from_pretrained(latest_checkpoint)
         tokenizer = AutoTokenizer.from_pretrained(latest_checkpoint)
+        real_num_params = sum(p.numel() for p in model.parameters())
     else:
-        model, tokenizer = create_model_and_tokenizer(args.num_params)
+        model, tokenizer, real_num_params = create_model_and_tokenizer(args.num_params)
     train_dataset, heldout_dataset = load_and_prepare_datasets(
         tokenizer, args.subset_size, args.N, args.qa_ratio, args.orders
     )
+
+    model_size_mb = calculate_model_size(real_num_params)
+    print(f"Estimated model size: {model_size_mb:.2f} MB")
 
 
     def preprocess_logits_for_metrics(logits, labels):
@@ -111,7 +112,7 @@ def main(args):
     print(f"Epochs: {epochs}")
     # Set up training arguments
     training_args = TrainingArguments(
-        output_dir=f"./results/n{args.N}_p{args.num_params}_omin{min(args.orders)}_omax{max(args.orders)}_wd{args.wd}_infinite",
+        output_dir=f"./results/n{args.N}_p{real_num_params}_omin{min(args.orders)}_omax{max(args.orders)}_wd{args.wd}_infinite",
         num_train_epochs=epochs,
         per_device_train_batch_size=args.train_batch_size,
         per_device_eval_batch_size=16,
@@ -119,16 +120,16 @@ def main(args):
         gradient_accumulation_steps=int(max(1, args.train_batch_size//32)),
         warmup_steps=500,
         weight_decay=args.wd,
-        logging_dir=f"./logs/n{args.N}_p{args.num_params}_omin{min(args.orders)}_omax{max(args.orders)}_wd{args.wd}_infinite",
+        logging_dir=f"./logs/n{args.N}_p{real_num_params}_omin{min(args.orders)}_omax{max(args.orders)}_wd{args.wd}_infinite",
         logging_steps=100,
         evaluation_strategy="steps",
         eval_steps=20000,
         save_steps=20000,
-        dataloader_num_workers=0,
+        dataloader_num_workers=15,
         fp16=True,
         tf32=True,
         hub_strategy="every_save",
-        hub_model_id=f"EleutherAI/llama_multihop_n{args.N}_p{args.num_params}_omin{min(args.orders)}_omax{max(args.orders)}_wd{args.wd}",
+        hub_model_id=f"EleutherAI/llama_multihop_n{args.N}_p{real_num_params}_omin{min(args.orders)}_omax{max(args.orders)}_wd{args.wd}",
         push_to_hub=args.push_to_hub,
         save_strategy="no"
     )
@@ -155,8 +156,8 @@ def main(args):
     print("Heldout Profiles Results:", heldout_results)
 
     # Save the model
-    model.save_pretrained(f"./final_model/n{args.N}_p{args.num_params}_omin{min(args.orders)}_omax{max(args.orders)}_wd{args.wd}")
-    tokenizer.save_pretrained(f"./final_model/n{args.N}_p{args.num_params}_omin{min(args.orders)}_omax{max(args.orders)}_wd{args.wd}")
+    model.save_pretrained(f"./final_model/n{args.N}_p{real_num_params}_omin{min(args.orders)}_omax{max(args.orders)}_wd{args.wd}")
+    tokenizer.save_pretrained(f"./final_model/n{args.N}_p{real_num_params}_omin{min(args.orders)}_omax{max(args.orders)}_wd{args.wd}")
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Train a Llama model with specified parameters")
@@ -167,7 +168,7 @@ if __name__ == "__main__":
     parser.add_argument("--resume_from", type=str, default=None, help="Resume training from given checkpoint")
     parser.add_argument("--qa_ratio", type=float, default=0.5,
                        help="Ratio of QA examples to bios examples")
-    parser.add_argument("--wd", type=float, default=0.01, help="Weight decay")
+    parser.add_argument("--wd", type=float, default=0.1, help="Weight decay")
     parser.add_argument("--push_to_hub", action="store_true", help="Push trained model to hf hub")
     parser.add_argument("--train_batch_size", type=int, default=16, help="Batch size for training")
     args = parser.parse_args()
