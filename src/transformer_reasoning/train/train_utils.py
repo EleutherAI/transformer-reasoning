@@ -6,7 +6,7 @@ from transformers import (
 )
 import torch
 
-from typing import TypeVar, Union
+from typing import TypeVar, Union, List
 from datasets import Dataset, DatasetDict
 from multiprocessing import cpu_count
 T = TypeVar("T", bound=Union[Dataset, DatasetDict])
@@ -16,8 +16,23 @@ from torch.utils.data import IterableDataset, DataLoader
 import random
 from transformer_reasoning.generate_dataset.generate_bios import generate_bio, load_templates
 from transformer_reasoning.generate_dataset.generate_qa_dataset import generate_question
-from transformer_reasoning.evaluation.eval_utils import get_qa_token_ranges
 from transformer_reasoning.utils import get_project_root
+
+def get_qa_token_ranges(text: str, tokenizer) -> List[int]:
+    """Get token indices for the answer portion of a QA text."""
+    parts = text.split("Answer:")
+    if len(parts) != 2:
+        return []
+        
+    answer_start = len(parts[0]) + len("Answer:")
+    
+    prefix_tokens = tokenizer.encode(text[:answer_start], add_special_tokens=True)
+    full_tokens = tokenizer.encode(text, add_special_tokens=True)
+
+    if len(prefix_tokens) > 1 and prefix_tokens[-1] != full_tokens[len(prefix_tokens)-1]:
+        prefix_tokens = prefix_tokens[:-1]
+
+    return list(range(len(prefix_tokens), len(full_tokens)))
 
 
 class LogConstantCheckpointCallback(TrainerCallback):
@@ -52,7 +67,7 @@ class InfiniteBiosDataset(IterableDataset):
 
     def __iter__(self):
         steps = 0
-        while steps < len(self.profiles):  # Stop after one "epoch"
+        while steps <= len(self.profiles):  # Stop after one "epoch"
             # But the next epoch will yield different samples
             # Generate multiple samples (either bios or QA)
             texts = []

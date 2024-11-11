@@ -39,9 +39,9 @@ def measure_capacity_method(model, tokenizer, qa_data, num_samples=1000, insert_
     return total_loss / total_tokens if total_tokens > 0 else float('inf')
 
 
-def loss_over_time_method(model, tokenizer, qa_data, insert_eos=True):
+def loss_over_time_method(model, tokenizer, qa_data):
     """Replicate loss_over_time.py's loss calculation"""
-    return evaluate_qa_loss(model, tokenizer, qa_data, model.device, len(qa_data), insert_eos)
+    return evaluate_qa_loss(model, qa_data, model.device, len(qa_data))
 
 def test_loss_calculation_methods():
     # Test parameters
@@ -54,7 +54,7 @@ def test_loss_calculation_methods():
     num_samples = 100  # Reduced for faster testing
 
     # Load model and data
-    parent_dir = filename_schemes(order, N, params, wd, finite)
+    parent_dir = filename_schemes(order, N, params, wd)
     assert parent_dir is not None, "Model directory not found"
     
     model_path = parent_dir / f"checkpoint-{checkpoint}"

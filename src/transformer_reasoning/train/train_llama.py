@@ -47,14 +47,14 @@ def load_and_prepare_datasets(tokenizer, subset_size=None, N=250000, qa_ratio=0.
         remove_columns=eval_dataset.column_names
     )
 
-    # Create infinite training dataset with consistent retained indices
+    # Create infinite training dataset
     train_dataset = InfiniteBiosDataset(
         profiles_dataset=profiles,
         tokenizer=tokenizer,
         max_seq_len=512,
         orders=orders or [1,2],
         qa_prob=qa_ratio,
-        qa_indices=retained_indices
+        qa_indices=list(range(len(profiles)))
     )
 
     return train_dataset, eval_dataset
@@ -108,7 +108,7 @@ def main(args):
         return torch.cat(selected_logits, dim=0)
 
     # This is the number of times we step through each profiles; the "dataset size" is infinite
-    epochs = 4_500*25000/len(train_dataset)
+    epochs = 4_500
     print(f"Epochs: {epochs}")
     # Set up training arguments
     training_args = TrainingArguments(
@@ -125,7 +125,7 @@ def main(args):
         evaluation_strategy="steps",
         eval_steps=20000,
         save_steps=20000,
-        dataloader_num_workers=15,
+        dataloader_num_workers=20,
         fp16=True,
         tf32=True,
         hub_strategy="every_save",
