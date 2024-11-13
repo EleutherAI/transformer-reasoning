@@ -23,7 +23,8 @@ dependencies = [
     "openai",
     "accelerate",
     "matplotlib",
-    "tokenizers"
+    "tokenizers",
+    "schedulefree"
 ]
 
 requires-python = ">=3.10"

@@ -82,7 +82,7 @@ def main(args):
         tokenizer = AutoTokenizer.from_pretrained(latest_checkpoint)
         real_num_params = sum(p.numel() for p in model.parameters())
     else:
-        model, tokenizer, real_num_params = create_model_and_tokenizer(args.num_params)
+        model, tokenizer, real_num_params = create_model_and_tokenizer(args.num_params, args.num_layers)
     train_dataset, heldout_dataset = load_and_prepare_datasets(
         tokenizer, args.subset_size, args.N, args.qa_ratio, args.orders
     )
@@ -108,28 +108,33 @@ def main(args):
         return torch.cat(selected_logits, dim=0)
 
     # This is the number of times we step through each profiles; the "dataset size" is infinite
-    epochs = 4_500
+    epochs = 9_000
     print(f"Epochs: {epochs}")
+    sf_string = "schedule_free" if args.schedule_free else "adamw"
     # Set up training arguments
     training_args = TrainingArguments(
-        output_dir=f"./results/n{args.N}_p{real_num_params}_omin{min(args.orders)}_omax{max(args.orders)}_wd{args.wd}_infinite",
+        output_dir=f"./results/n{args.N}_p{real_num_params}_omin{min(args.orders)}_omax{max(args.orders)}_wd{args.wd}_infinite_{sf_string}_l{args.num_layers}_lr{args.lr}_beta1{args.beta1}",
         num_train_epochs=epochs,
         per_device_train_batch_size=args.train_batch_size,
         per_device_eval_batch_size=16,
         eval_accumulation_steps=1,
         gradient_accumulation_steps=int(max(1, args.train_batch_size//32)),
-        warmup_steps=500,
+        warmup_steps=40000 if args.resume_from else 500,
         weight_decay=args.wd,
-        logging_dir=f"./logs/n{args.N}_p{real_num_params}_omin{min(args.orders)}_omax{max(args.orders)}_wd{args.wd}_infinite",
+        logging_dir=f"./logs/n{args.N}_p{real_num_params}_omin{min(args.orders)}_omax{max(args.orders)}_wd{args.wd}_infinite_{sf_string}_l{args.num_layers}_lr{args.lr}_beta1{args.beta1}",
         logging_steps=100,
         evaluation_strategy="steps",
+        optim="schedule_free_adamw" if args.schedule_free else "adamw_torch",
+        lr_scheduler_type="constant" if args.schedule_free else "linear",
+        learning_rate=args.lr,
+        adam_beta1=args.beta1,
         eval_steps=20000,
         save_steps=20000,
         dataloader_num_workers=20,
         fp16=True,
         tf32=True,
         hub_strategy="every_save",
-        hub_model_id=f"EleutherAI/llama_multihop_n{args.N}_p{real_num_params}_omin{min(args.orders)}_omax{max(args.orders)}_wd{args.wd}",
+        hub_model_id=f"EleutherAI/llama_multihop_n{args.N}_p{real_num_params}_omin{min(args.orders)}_omax{max(args.orders)}_wd{args.wd}_{sf_string}_l{args.num_layers}_lr{args.lr}_beta1{args.beta1}",
         push_to_hub=args.push_to_hub,
         save_strategy="no"
     )
@@ -143,11 +148,14 @@ def main(args):
         data_collator=DataCollatorForLanguageModeling(tokenizer=tokenizer, mlm=False),
         preprocess_logits_for_metrics=preprocess_logits_for_metrics,
     )
-
     trainer.add_callback(LogConstantCheckpointCallback(trainer))
 
     if args.resume_from:
-        trainer.train(resume_from_checkpoint=latest_checkpoint)
+        resume_from_optim_match = (args.schedule_free and 'schedule_free' in latest_checkpoint) or (not args.schedule_free and  not 'schedule_free' in latest_checkpoint)
+        if resume_from_optim_match:
+            trainer.train(resume_from_checkpoint=latest_checkpoint)
+        else:
+            trainer.train()
     else:
         trainer.train()
 
@@ -156,8 +164,8 @@ def main(args):
     print("Heldout Profiles Results:", heldout_results)
 
     # Save the model
-    model.save_pretrained(f"./final_model/n{args.N}_p{real_num_params}_omin{min(args.orders)}_omax{max(args.orders)}_wd{args.wd}")
-    tokenizer.save_pretrained(f"./final_model/n{args.N}_p{real_num_params}_omin{min(args.orders)}_omax{max(args.orders)}_wd{args.wd}")
+    model.save_pretrained(f"./final_model/n{args.N}_p{real_num_params}_omin{min(args.orders)}_omax{max(args.orders)}_wd{args.wd}_{sf_string}_l{args.num_layers}_lr{args.lr}_beta1{args.beta1}")
+    tokenizer.save_pretrained(f"./final_model/n{args.N}_p{real_num_params}_omin{min(args.orders)}_omax{max(args.orders)}_wd{args.wd}_{sf_string}_l{args.num_layers}_lr{args.lr}_beta1{args.beta1}")
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Train a Llama model with specified parameters")
@@ -171,6 +179,10 @@ if __name__ == "__main__":
     parser.add_argument("--wd", type=float, default=0.1, help="Weight decay")
     parser.add_argument("--push_to_hub", action="store_true", help="Push trained model to hf hub")
     parser.add_argument("--train_batch_size", type=int, default=16, help="Batch size for training")
+    parser.add_argument("--schedule_free", action="store_true", help="Use schedule-free training")
+    parser.add_argument("--num_layers", type=int, default=4, help="Number of layers in the model")
+    parser.add_argument("--lr", type=float, default=1e-3, help="Learning rate")
+    parser.add_argument("--beta1", type=float, default=0.9, help="Beta1 for AdamW optimizer")
     args = parser.parse_args()
     
     main(args)

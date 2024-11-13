@@ -291,7 +291,7 @@ def main():
 
     for N in N_sizes:
         # Load loss data from CSV
-        csv_path = get_project_root() / f"results/loss_over_time_{N}_uniform.csv"
+        csv_path = get_project_root() / f"results/loss_over_time_{N}_batched.csv"
         if not csv_path.exists():
             raise FileNotFoundError(f"Loss data not found at {csv_path}")
         

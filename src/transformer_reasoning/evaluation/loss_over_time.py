@@ -36,7 +36,6 @@ def evaluate_checkpoints(
     finite: bool = False,
     checkpoints: list = [],
     num_samples: int = 8000,
-    only_norms: bool = False
 ) -> Dict[str, List[float]]:
     """Evaluate loss for different tasks across checkpoints."""
     device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -47,23 +46,43 @@ def evaluate_checkpoints(
 
     checkpoint_paths = checkpoints
     
-    # Only load datasets if we're calculating losses
-    if not only_norms:
-        tokenizer = AutoTokenizer.from_pretrained("EleutherAI/llama_multihop_tokenizer")
-        tokenizer.pad_token = tokenizer.eos_token
-        profiles_dataset = load_dataset(f"EleutherAI/profiles_dataset_{N}_uniform")['train']
-        qa_dataset_1 = iter(InfiniteBiosDataset(profiles_dataset, tokenizer, orders = [1], qa_prob=1, qa_indices = list(range(len(profiles_dataset)))))
-        qa_dataset_2 = iter(InfiniteBiosDataset(profiles_dataset, tokenizer, orders = [2], qa_prob=1, qa_indices = list(range(len(profiles_dataset)))))
-        
-        qa_data_1hop = []
-        qa_data_2hop = []
-        counter = 0
-        for qa_item_1, qa_item_2 in zip(qa_dataset_1, qa_dataset_2):
-            counter += 1
-            if counter > num_samples:
-                break
-            qa_data_1hop.append(qa_item_1)
-            qa_data_2hop.append(qa_item_2)
+    # Set seeds for reproducibility
+    torch.manual_seed(42)
+    np.random.seed(42)
+    
+    tokenizer = AutoTokenizer.from_pretrained("EleutherAI/llama_multihop_tokenizer")
+    tokenizer.pad_token = tokenizer.eos_token
+    profiles_dataset = load_dataset(f"EleutherAI/profiles_dataset_{N}_uniform")['train']
+    
+    eval_indices = np.random.RandomState(42).choice(
+        len(profiles_dataset), 
+        size=num_samples, 
+        replace=False
+    )
+    qa_dataset_1 = iter(InfiniteBiosDataset(
+        profiles_dataset, 
+        tokenizer, 
+        orders=[1], 
+        qa_prob=1, 
+        qa_indices=eval_indices.tolist()
+    ))
+    qa_dataset_2 = iter(InfiniteBiosDataset(
+        profiles_dataset, 
+        tokenizer, 
+        orders=[2], 
+        qa_prob=1, 
+        qa_indices=eval_indices.tolist()
+    ))
+    
+    qa_data_1hop = []
+    qa_data_2hop = []
+    counter = 0
+    for qa_item_1, qa_item_2 in zip(qa_dataset_1, qa_dataset_2):
+        counter += 1
+        if counter > num_samples:
+            break
+        qa_data_1hop.append(qa_item_1)
+        qa_data_2hop.append(qa_item_2)
     
     results = {
         "steps": [],
@@ -76,11 +95,10 @@ def evaluate_checkpoints(
         "dataset_finite": [],
     }
     
-    if not only_norms:
-        results.update({
-            "qa_1hop_loss": [],
-            "qa_2hop_loss": [],
-        })
+    results.update({
+        "qa_1hop_loss": [],
+        "qa_2hop_loss": [],
+    })
     
     for checkpoint_path in checkpoint_paths:
         print(f"Evaluating checkpoint: {checkpoint_path}")
@@ -89,15 +107,15 @@ def evaluate_checkpoints(
         results["steps"].append(step)
         
         model = AutoModelForCausalLM.from_pretrained(checkpoint_path).to(device)
-        l2_norm = torch.norm(torch.cat([p.flatten() for p in model.parameters()])).item()
+        all_params = torch.cat([p.flatten() for p in model.parameters()])
+        l2_norm = torch.norm(all_params).item() / np.sqrt(all_params.numel())
         results["l2_norm"].append(l2_norm)
         
-        if not only_norms:
-            qa_1hop_loss = evaluate_qa_loss(model, qa_data_1hop, device, num_samples)
-            qa_2hop_loss = evaluate_qa_loss(model, qa_data_2hop, device, num_samples)
-            results["qa_1hop_loss"].append(qa_1hop_loss)
-            results["qa_2hop_loss"].append(qa_2hop_loss)
-            print(f"qa_1hop_loss: {qa_1hop_loss}, qa_2hop_loss: {qa_2hop_loss}")
+        qa_1hop_loss = evaluate_qa_loss(model, qa_data_1hop, device, num_samples)
+        qa_2hop_loss = evaluate_qa_loss(model, qa_data_2hop, device, num_samples)
+        results["qa_1hop_loss"].append(qa_1hop_loss)
+        results["qa_2hop_loss"].append(qa_2hop_loss)
+        print(f"qa_1hop_loss: {qa_1hop_loss}, qa_2hop_loss: {qa_2hop_loss}")
         
         results["model_min_hops"].append(min_order)
         results["model_max_hops"].append(max_order)
@@ -142,7 +160,7 @@ def plot_losses(all_results: DataFrame, save_path: Optional[str] = None):
             loss_key = f"qa_{hop}hop_loss" if hop > 0 else "bio_loss"
             
             # Create lmplot for each configuration
-            for _, group in order_results.groupby(['model_wd', 'dataset_finite', 'model_params']):
+            for _, group in order_results.groupby(['model_wd', 'model_params']):
                 color = plt.cm.viridis(norm(group['model_params'].iloc[0]))
                 sns.regplot(
                     data=group,
@@ -153,7 +171,7 @@ def plot_losses(all_results: DataFrame, save_path: Optional[str] = None):
                     scatter_kws={'color': color},
                     marker="o" if group['dataset_finite'].iloc[0] else "s",
                     line_kws={'color': color, 'alpha': 0.7},
-                    label=f"wd={group['model_wd'].iloc[0]}, params={group['model_params'].iloc[0]}, {'fin' if group['dataset_finite'].iloc[0] else 'inf'}"
+                    label=f"wd={group['model_wd'].iloc[0]}, params={group['model_params'].iloc[0]}"
                 )
             
             # Set titles and labels
@@ -191,18 +209,16 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--num_checkpoints", type=int, default=20,
                        help="Number of checkpoints to evaluate")
-    parser.add_argument("--num_samples", type=int, default=2000,
+    parser.add_argument("--num_samples", type=int, default=500,
                        help="Number of samples to evaluate")
     parser.add_argument("--recalculate", action="store_true",
                        help="Recalculate results")
-    parser.add_argument("--only_norms", action="store_true",
-                       help="Only calculate L2 norms")
     
     args = parser.parse_args()
     wd = 0.1
     new_results = []
     for N in [10000, 15000, 20000, 25000, 30000, 50000]:
-        csv_path = get_project_root() / f"results/loss_over_time_{N}_uniform.csv"
+        csv_path = get_project_root() / f"results/loss_over_time_{N}_batched.csv"
         results_df = pd.read_csv(csv_path) if csv_path.exists() else pd.DataFrame()
         
         for params in [435888, 890320, 1166688, 1475824]:
@@ -217,85 +233,60 @@ def main():
                             (results_df['model_wd'] == wd)
                         ]
 
-                        if 'l2_norm' not in results_df_filtered.columns:
-                            results_df_filtered['l2_norm'] = np.nan
-                        
-                        model_dir = filename_schemes(min_order, max_order, N, params, wd)
-                        if not model_dir:
-                            continue
-                            
-                        all_checkpoints = sorted(list(model_dir.glob("checkpoint-*")))
-                        
-                        if args.only_norms:
-                            # For norm-only mode, evaluate checkpoints that either:
-                            # 1. Don't have l2_norm in results
-                            # 2. Have NaN l2_norm values
-                            existing_steps = set(results_df_filtered['steps'])
-                            new_checkpoints = [cp for cp in all_checkpoints 
-                                             if int(cp.stem.split('-')[-1]) in existing_steps]
-                        else:
-                            # Original logic for full evaluation
-                            last_step = results_df_filtered['steps'].max()
-                            if np.isnan(last_step):
-                                last_step = 0
-                            print(f"Evaluating from step {last_step}")
-                            new_checkpoints = [cp for cp in all_checkpoints 
-                                             if int(cp.stem.split('-')[-1]) > last_step]
-                        
-                        if len(new_checkpoints) == 0:
-                            continue
+                        last_step = results_df_filtered['steps'].max()
+                        if np.isnan(last_step):
+                            last_step = 0
 
-                        if (len(new_checkpoints) < args.num_checkpoints) or args.only_norms:
-                            checkpoints_to_evaluate = new_checkpoints
-                        else:
-                            cp_steps = [int(cp.stem.split('-')[-1]) for cp in new_checkpoints]
-                            num_checkpoints = int(args.num_checkpoints * (max(cp_steps) - last_step)/max(cp_steps))
-                            indices = np.linspace(0, len(new_checkpoints)-1, num_checkpoints, dtype=int)
-                            checkpoints_to_evaluate = [new_checkpoints[i] for i in indices]
-
-                        result = evaluate_checkpoints(
-                            N=N,
-                            min_order=min_order,
-                            max_order=max_order,
-                            params=params,
-                            wd=wd,
-                            checkpoints=checkpoints_to_evaluate,
-                            num_samples=args.num_samples,
-                            only_norms=args.only_norms
-                        )
+                    else:
+                        last_step = 0
+                    
+                    model_dir = filename_schemes(min_order, max_order, N, params, wd)
+                    if not model_dir:
+                        continue
                         
-                        if result:
-                            new_result_df = pd.DataFrame(result)
-                            if args.only_norms:
-                                # Create merge key columns
-                                merge_cols = ['steps', 'model_min_hops', 'model_max_hops', 
-                                            'model_params', 'model_wd', 'dataset_N']
-                                
-                                # Merge new norms with existing results, keeping all loss values
-                                results_df = pd.merge(
-                                    results_df,
-                                    new_result_df[merge_cols + ['l2_norm']],
-                                    on=merge_cols,
-                                    how='left',
-                                    suffixes=('_old', '')
-                                )
-                                # Update l2_norm column, preferring new values
-                                if 'l2_norm_old' in results_df.columns:
-                                    results_df['l2_norm'] = results_df['l2_norm'].fillna(results_df['l2_norm_old'])
-                                    results_df = results_df.drop(columns=['l2_norm_old'])
-                            else:
-                                # Original behavior for full evaluations
-                                new_results.append(new_result_df)
+                    all_checkpoints = sorted(list(model_dir.glob("checkpoint-*")))
+                    
+
+
+                    print(f"Evaluating from step {last_step}")
+                    new_checkpoints = [cp for cp in all_checkpoints 
+                                        if int(cp.stem.split('-')[-1]) > last_step]
+                        
+                    if len(new_checkpoints) == 0:
+                        continue
+
+                    if (len(new_checkpoints) < args.num_checkpoints):
+                        checkpoints_to_evaluate = new_checkpoints
+                    else:
+                        cp_steps = [int(cp.stem.split('-')[-1]) for cp in new_checkpoints]
+                        num_checkpoints = int(args.num_checkpoints * (max(cp_steps) - last_step)/max(cp_steps))
+                        indices = np.linspace(0, len(new_checkpoints)-1, num_checkpoints, dtype=int)
+                        checkpoints_to_evaluate = [new_checkpoints[i] for i in indices]
+
+                    result = evaluate_checkpoints(
+                        N=N,
+                        min_order=min_order,
+                        max_order=max_order,
+                        params=params,
+                        wd=wd,
+                        checkpoints=checkpoints_to_evaluate,
+                        num_samples=args.num_samples,
+                    )
+                    
+                    if result:
+                        new_result_df = pd.DataFrame(result)
+                        # Original behavior for full evaluations
+                        new_results.append(new_result_df)
                         
         # Append new results if any
         if new_results:
             new_results_df = pd.concat(new_results)
             results_df = pd.concat([results_df, new_results_df], ignore_index=True)
-        if new_results or args.only_norms:
+        if new_results:
             results_df[results_df['dataset_N'] == N].to_csv(csv_path, index=False)
 
-        if len(results_df) > 0 and not args.only_norms:
-            save_path = get_project_root() / f"results/loss_over_time_{N}_uniform.png"
+        if len(results_df) > 0:
+            save_path = get_project_root() / f"results/loss_over_time_{N}_batched.png"
             plot_losses(results_df[results_df['dataset_N'] == N], save_path)
 
 if __name__ == "__main__":

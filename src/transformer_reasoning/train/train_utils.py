@@ -160,8 +160,8 @@ def calculate_architecture(num_params, n_layers=4):
     return n_layers, hidden_size
 
 
-def create_model_and_tokenizer(num_params):
-    n_layers, hidden_size = calculate_architecture(num_params)
+def create_model_and_tokenizer(num_params, num_layers=4):
+    n_layers, hidden_size = calculate_architecture(num_params, num_layers)
     
     tokenizer = AutoTokenizer.from_pretrained("EleutherAI/llama_multihop_tokenizer")
     tokenizer.pad_token = tokenizer.eos_token
