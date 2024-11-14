@@ -5,6 +5,12 @@ from transformers import (
     PreTrainedTokenizerBase
 )
 import torch
+import os
+import glob
+import numpy as np
+import pandas as pd
+import json
+from datetime import datetime
 
 from typing import TypeVar, Union, List
 from datasets import Dataset, DatasetDict
@@ -14,9 +20,227 @@ T = TypeVar("T", bound=Union[Dataset, DatasetDict])
 
 from torch.utils.data import IterableDataset, DataLoader
 import random
+from schedulefree import AdamWScheduleFree
+from transformers import get_cosine_schedule_with_warmup
+from torch.optim import AdamW as TorchAdamW
+
 from transformer_reasoning.generate_dataset.generate_bios import generate_bio, load_templates
 from transformer_reasoning.generate_dataset.generate_qa_dataset import generate_question
 from transformer_reasoning.utils import get_project_root
+
+from tqdm import tqdm
+
+
+def train_parallel_models(models_dict, train_dataset, onehop_dataset, twohop_dataset, args, output_dirs=None, dl_workers = 20):
+    early_saves = set([int(math.exp(i)) for i in torch.linspace(math.log(100), math.log(100000), 10).tolist()])
+    
+    # Assign each model to a different GPU
+    models = [model.to(f'cuda:{cuda_device}') for cuda_device, model in zip(args.gpus, models_dict['model'])]
+    
+    # Create or load optimizers
+    optimizers = []
+    schedulers = []
+    start_step = 0
+    for i, model in enumerate(models):
+        latest_checkpoint = None
+        if args.resume_from_checkpoint and output_dirs:
+            for i, base_dir in enumerate(output_dirs):
+                checkpoints = glob.glob(os.path.join(base_dir, "checkpoint-*"))
+            latest_checkpoint = sorted(checkpoints, key=lambda x: int(x.split("-")[-1]))[-1]
+        optimizer, scheduler, step = create_or_load_optimizer(model, args, latest_checkpoint)
+        optimizers.append(optimizer)
+        schedulers.append(scheduler)
+        if step > start_step:
+            start_step = step
+    
+    global_step = start_step
+    
+    train_loader = DataLoader(
+        train_dataset,
+        batch_size=args.train_batch_size,
+        num_workers=dl_workers,
+        pin_memory=True
+    )
+    
+    onehop_loader = DataLoader(
+        onehop_dataset,
+        batch_size=args.eval_batch_size,
+        num_workers=dl_workers,
+        pin_memory=True
+    )
+
+    twohop_loader = DataLoader(
+        twohop_dataset,
+        batch_size=args.eval_batch_size,
+        num_workers=dl_workers,
+        pin_memory=True
+    )
+    
+    results_dicts = []
+    # Initialize logging
+    log_file = os.path.join('./logs', f"training_log_{datetime.now().strftime('%Y%m%d_%H%M%S')}.jsonl")
+    
+    # Create streams and events for each GPU
+    streams = {device: torch.cuda.Stream(device=device) for device in args.gpus}
+    events = {device: torch.cuda.Event(enable_timing=True) for device in args.gpus}
+
+    for epoch in range(args.num_epochs):
+        # Training mode
+        [model.train() for model in models]
+        if hasattr(optimizers[0], 'train'):
+            [optimizer.train() for optimizer in optimizers]
+
+        pbar = tqdm(train_loader, desc=f"Epoch {epoch}")
+        for batch in pbar:
+            losses = []
+            
+            # Start forward passes in parallel
+            for cuda_device, (model, optimizer, scheduler) in zip(args.gpus, zip(models, optimizers, schedulers)):
+                stream = streams[cuda_device]
+                with torch.cuda.stream(stream):
+                    # Pre-transfer data to GPU
+                    input_ids = batch['input_ids'].to(f'cuda:{cuda_device}', non_blocking=True)
+                    labels = batch['labels'].to(f'cuda:{cuda_device}', non_blocking=True)
+                    
+                    optimizer.zero_grad()
+                    
+                    # Forward pass
+                    outputs = model(input_ids=input_ids, labels=labels)
+                    loss = outputs.loss
+                    losses.append(loss)
+                    
+                    # Backward pass
+                    loss.backward()
+                    
+                    # Optimizer steps
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+                    optimizer.step()
+                    if scheduler:
+                        scheduler.step()
+                    
+                    # Record event for this GPU
+                    events[cuda_device].record(stream)
+
+            # Wait for all GPUs to finish
+            for event in events.values():
+                event.synchronize()
+            
+            # Calculate average loss
+            avg_loss = sum(l.item() for l in losses) / len(losses)
+            global_step += 1
+            pbar.set_postfix({'avg_loss': avg_loss, 'step': global_step})
+            
+            # Check if we should evaluate and save
+            should_save = (global_step < 100000 and global_step in early_saves) or \
+                         (global_step >= 100000 and global_step % 100000 == 0)
+            
+            if should_save:
+                # Evaluation mode
+                [model.eval() for model in models]
+                if hasattr(optimizers[0], 'eval'):
+                    [optimizer.eval() for optimizer in optimizers]
+                
+                results_dicts.append(evaluate_models(models_dict, onehop_loader, global_step, 1))
+                results_dicts.append(evaluate_models(models_dict, twohop_loader, global_step, 2))
+
+                # Save checkpoints using HF interface
+                for i, (model, optimizer, scheduler) in enumerate(zip(models, optimizers, schedulers)):
+                    model_path = f"{output_dirs[i]}/checkpoint-{global_step}"
+                    model.save_pretrained(model_path)
+                    
+                    # Save optimizer and scheduler state separately
+                    optimizer_state = {
+                        'optimizer_state_dict': optimizer.state_dict(),
+                        'step': global_step,
+                        'onehop_loss': results_dicts[-2]['loss'][i],
+                        'twohop_loss': results_dicts[-1]['loss'][i]
+                    }
+                    if scheduler:
+                        optimizer_state['scheduler_state_dict'] = scheduler.state_dict()
+                    torch.save(optimizer_state, f"{model_path}/optimizer.pt")
+                
+                results_df = pd.DataFrame(results_dicts)
+                results_df.to_csv(f"{output_dirs[i]}/eval_results.csv", index=False)
+                # Back to training mode
+                [model.train() for model in models]
+                if hasattr(optimizers[0], 'train'):
+                    [optimizer.train() for optimizer in optimizers]
+
+            # Log training metrics
+            log_entry = {
+                'step': global_step,
+                'epoch': epoch,
+                'train_loss': avg_loss,
+                'timestamp': datetime.now().isoformat()
+            }
+            
+            if should_save:
+                # Add evaluation metrics to log
+                log_entry.update({
+                    'onehop_loss': results_dicts[-2]['loss'],
+                    'twohop_loss': results_dicts[-1]['loss'],
+                    'parameter_l2': results_dicts[-1]['parameter_l2']
+                })
+            
+            # Save log entry
+            with open(log_file, 'a') as f:
+                f.write(json.dumps(log_entry) + '\n')
+            
+            pbar.set_postfix({'loss': avg_loss, 'step': global_step})
+
+def evaluate_models(models_dict, eval_loader, global_step, hop_count):
+    results_dict = {
+        'loss': [0, 0, 0, 0],
+        'num_params': [],
+        'num_layers': [],
+        'N_profiles': [],
+        'orders': [],
+        'wd': [],
+        'lr': [],
+        'beta1': [],
+        'global_step': [],
+        'parameter_l2': []
+    }
+
+    with torch.no_grad():
+        eval_questions = 0
+        pbar = tqdm(eval_loader, desc=f"Evaluating {hop_count}-hop")
+        for eval_batch in pbar:
+            labels = eval_batch['labels']
+            last_neg = labels[:,-1] == -100
+            if not last_neg.any():
+                continue
+            filtered_inputs = eval_batch['input_ids'][last_neg]
+            filtered_labels = eval_batch['labels'][last_neg]
+            is_pos = filtered_labels >= 0
+            block_starts = ((is_pos) & (~torch.roll(is_pos, 1))).sum()
+            eval_questions += block_starts.item()
+
+            for i, model in enumerate(models_dict['model']):
+                outputs = model(
+                    input_ids=filtered_inputs.to(f'cuda:{i}'),
+                    labels=filtered_labels.to(f'cuda:{i}')
+                )
+                
+                results_dict['loss'][i] += outputs.loss.item() * is_pos.sum().item()
+                
+                results_dict.update({
+                    k: models_dict[k][i] for k in 
+                    ['num_params', 'num_layers', 'N_profiles', 'orders', 'wd', 'lr', 'beta1']
+                })
+                
+                results_dict['global_step'].append(global_step)
+                all_params = torch.cat([p.flatten() for p in model.parameters()])
+                results_dict['parameter_l2'].append(torch.norm(all_params).item() / np.sqrt(all_params.numel()))
+            
+            pbar.set_postfix({'eval_questions': eval_questions})
+            if eval_questions >= 500:
+                break
+    
+    for i, loss in enumerate(results_dict['loss']):
+        results_dict['loss'][i] = loss / eval_questions
+    print(f"Step {global_step}: Evaluation Loss = {results_dict['loss']}")
+    return results_dict
 
 def get_qa_token_ranges(text: str, tokenizer) -> List[int]:
     """Get token indices for the answer portion of a QA text."""
@@ -63,11 +287,12 @@ class InfiniteBiosDataset(IterableDataset):
         self.order_weights = [10**i for i in range(len(orders))]
 
     def __len__(self):
-        return len(self.profiles)
+        return len(self.qa_indices)
 
     def __iter__(self):
         steps = 0
-        while steps <= len(self.profiles):  # Stop after one "epoch"
+        while steps <= len(self.qa_indices):  # Stop after one "epoch"
+            steps += 1
             # But the next epoch will yield different samples
             # Generate multiple samples (either bios or QA)
             texts = []
@@ -84,9 +309,10 @@ class InfiniteBiosDataset(IterableDataset):
                     # Generate bio
                     profile_idx = random.randrange(len(self.profiles))
                     profile = self.profiles[profile_idx]
-                    texts.append(generate_bio(profile, self.templates))
+                    bio = generate_bio(profile, self.templates)
+                    texts.append(bio)
                     if self.tokenizer:
-                        answer_token_ranges.append(list(range(len(texts))))
+                        answer_token_ranges.append(list(range(len(bio))))
             
             # If no tokenizer provided, just return the text chunk
             if self.tokenizer is None:
@@ -100,8 +326,8 @@ class InfiniteBiosDataset(IterableDataset):
                 joined_text,
                 max_length=self.max_seq_len,
                 return_attention_mask=False,
-                return_overflowing_tokens=True,
                 truncation=True,
+                return_tensors="pt"
             )
             # First tokenize each text and create its labels
             individual_labels = []
@@ -121,24 +347,14 @@ class InfiniteBiosDataset(IterableDataset):
             # Split into chunks
             chunked_labels = [final_labels[i:i + self.max_seq_len] 
                             for i in range(0, len(final_labels), self.max_seq_len)]
-            
+            chunked_labels = chunked_labels[:len(output["input_ids"])]
             for j, (labels_chunk, ids_chunk) in enumerate(zip(chunked_labels, output["input_ids"])):
                 for i, (l, id) in enumerate(zip(labels_chunk, ids_chunk)):
                     if l == 1:
                         chunked_labels[j][i] = id
-            
-            # Handle overflow tokens
-            if overflow := output.pop("overflow_to_sample_mapping", None):
-                for i, ids in enumerate(output["input_ids"][:-1]):
-                    steps += 1
-                    if steps >= len(self.profiles):
-                        break
-                    yield {"input_ids": ids, "text": joined_text, "labels": chunked_labels[i]}
-            else:
-                if len(output["input_ids"][0]) == self.max_seq_len:
-                    steps += 1
-                    yield {"input_ids": output["input_ids"], "text": joined_text, "labels": chunked_labels}
+            chunked_labels = torch.tensor(chunked_labels)
 
+            yield {"input_ids": output["input_ids"].squeeze(0), "text": joined_text, "labels": chunked_labels.squeeze(0)}
 
     def generate_qa(self):
         profile_idx = random.choice(self.qa_indices)
@@ -290,3 +506,40 @@ def get_columns_all_equal(dataset: Union[Dataset, DatasetDict]) -> list[str]:
         return columns
 
     return dataset.column_names
+
+def create_or_load_optimizer(model, args, checkpoint_path=None):
+    """Create a new optimizer or load from checkpoint."""
+    if args.optimizer_type == "schedulefree":
+        optimizer = AdamWScheduleFree(
+            model.parameters(),
+            lr=args.lr,
+            betas=(args.beta1, 0.999),
+            weight_decay=args.wd,
+            warmup_steps=1000
+        )
+        scheduler = None
+    else:  # regular AdamW with cosine scheduler
+        optimizer = TorchAdamW(
+            model.parameters(),
+            lr=args.lr,
+            betas=(args.beta1, 0.999),
+            weight_decay=args.wd
+        )
+        scheduler = get_cosine_schedule_with_warmup(
+            optimizer,
+            num_warmup_steps=1000,
+            num_training_steps=args.num_training_steps
+        )
+    
+    start_step = 0
+    if checkpoint_path:
+        optimizer_path = f"{checkpoint_path}/optimizer.pt"
+        if os.path.exists(optimizer_path):
+            optimizer_state = torch.load(optimizer_path)
+            optimizer.load_state_dict(optimizer_state['optimizer_state_dict'])
+            if scheduler and 'scheduler_state_dict' in optimizer_state:
+                scheduler.load_state_dict(optimizer_state['scheduler_state_dict'])
+            start_step = optimizer_state['step']
+            print(f"Loaded optimizer state from step {start_step}")
+    
+    return optimizer, scheduler, start_step
