@@ -31,7 +31,7 @@ from transformer_reasoning.utils import get_project_root
 from tqdm import tqdm
 
 
-def train_parallel_models(models_dict, train_dataset, onehop_dataset, twohop_dataset, args, output_dirs=None, dl_workers = 20):
+def train_parallel_models(models_dict, train_dataset, onehop_dataset, twohop_dataset, args, output_dirs=None, dl_workers = 25):
     early_saves = set([int(math.exp(i)) for i in torch.linspace(math.log(100), math.log(100000), 10).tolist()])
     
     # Assign each model to a different GPU
@@ -79,10 +79,8 @@ def train_parallel_models(models_dict, train_dataset, onehop_dataset, twohop_dat
     results_dicts = []
     # Initialize logging
     log_file = os.path.join('./logs', f"training_log_{datetime.now().strftime('%Y%m%d_%H%M%S')}.jsonl")
-    
-    # Create streams and events for each GPU
-    streams = {device: torch.cuda.Stream(device=device) for device in args.gpus}
-    events = {device: torch.cuda.Event(enable_timing=True) for device in args.gpus}
+
+    cuda_streams = {device: torch.cuda.Stream(device=device) for device in args.gpus}
 
     for epoch in range(args.num_epochs):
         # Training mode
@@ -93,48 +91,46 @@ def train_parallel_models(models_dict, train_dataset, onehop_dataset, twohop_dat
         pbar = tqdm(train_loader, desc=f"Epoch {epoch}")
         for batch in pbar:
             losses = []
-            
-            # Start forward passes in parallel
+            # Process models in parallel using async CUDA operations
             for cuda_device, (model, optimizer, scheduler) in zip(args.gpus, zip(models, optimizers, schedulers)):
-                stream = streams[cuda_device]
-                with torch.cuda.stream(stream):
-                    # Pre-transfer data to GPU
-                    input_ids = batch['input_ids'].to(f'cuda:{cuda_device}', non_blocking=True)
-                    labels = batch['labels'].to(f'cuda:{cuda_device}', non_blocking=True)
-                    
+                with torch.cuda.stream(cuda_streams[cuda_device]):
                     optimizer.zero_grad()
                     
-                    # Forward pass
-                    outputs = model(input_ids=input_ids, labels=labels)
+                    outputs = model(
+                        input_ids=batch['input_ids'].to(f'cuda:{cuda_device}', non_blocking=True),
+                        labels=batch['labels'].to(f'cuda:{cuda_device}', non_blocking=True)
+                    )
+                    
                     loss = outputs.loss
-                    losses.append(loss)
-                    
-                    # Backward pass
+                    losses.append(loss.item())
                     loss.backward()
-                    
-                    # Optimizer steps
                     torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
                     optimizer.step()
                     if scheduler:
                         scheduler.step()
-                    
-                    # Record event for this GPU
-                    events[cuda_device].record(stream)
 
-            # Wait for all GPUs to finish
-            for event in events.values():
-                event.synchronize()
+            # Only synchronize when we need to update the progress bar
+            if global_step % 100 == 0:  # Update progress less frequently
+                torch.cuda.synchronize()
+                avg_loss = sum(losses) / len(losses)
+                pbar.set_postfix({'avg_loss': avg_loss, 'step': global_step})
+                log_entry = {
+                    'step': global_step,
+                    'epoch': epoch,
+                    'train_loss': avg_loss,
+                    'timestamp': datetime.now().isoformat()
+                }
+                with open(log_file, 'a') as f:
+                    f.write(json.dumps(log_entry) + '\n')
             
-            # Calculate average loss
-            avg_loss = sum(l.item() for l in losses) / len(losses)
+                pbar.set_postfix({'loss': avg_loss, 'step': global_step})
+            
             global_step += 1
-            pbar.set_postfix({'avg_loss': avg_loss, 'step': global_step})
-            
-            # Check if we should evaluate and save
+
             should_save = (global_step < 100000 and global_step in early_saves) or \
                          (global_step >= 100000 and global_step % 100000 == 0)
-            
             if should_save:
+                torch.cuda.synchronize()
                 # Evaluation mode
                 [model.eval() for model in models]
                 if hasattr(optimizers[0], 'eval'):
@@ -165,16 +161,7 @@ def train_parallel_models(models_dict, train_dataset, onehop_dataset, twohop_dat
                 [model.train() for model in models]
                 if hasattr(optimizers[0], 'train'):
                     [optimizer.train() for optimizer in optimizers]
-
-            # Log training metrics
-            log_entry = {
-                'step': global_step,
-                'epoch': epoch,
-                'train_loss': avg_loss,
-                'timestamp': datetime.now().isoformat()
-            }
             
-            if should_save:
                 # Add evaluation metrics to log
                 log_entry.update({
                     'onehop_loss': results_dicts[-2]['loss'],
@@ -182,11 +169,6 @@ def train_parallel_models(models_dict, train_dataset, onehop_dataset, twohop_dat
                     'parameter_l2': results_dicts[-1]['parameter_l2']
                 })
             
-            # Save log entry
-            with open(log_file, 'a') as f:
-                f.write(json.dumps(log_entry) + '\n')
-            
-            pbar.set_postfix({'loss': avg_loss, 'step': global_step})
 
 def evaluate_models(models_dict, eval_loader, global_step, hop_count):
     results_dict = {
@@ -279,7 +261,7 @@ class InfiniteBiosDataset(IterableDataset):
         self.profiles = profiles_dataset
         self.tokenizer = tokenizer
         self.max_seq_len = max_seq_len
-        self.samples_per_yield = math.ceil((max_seq_len//75)*(1-qa_prob) + (max_seq_len//10)*qa_prob)
+        self.samples_per_yield = math.ceil((max_seq_len//75)*(1-qa_prob) + (max_seq_len//20)*qa_prob)
         self.orders = orders
         self.qa_prob = qa_prob
         self.templates = load_templates(get_project_root() / "generated_data/templates")
