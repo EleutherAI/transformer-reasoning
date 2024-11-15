@@ -30,8 +30,51 @@ from transformer_reasoning.utils import get_project_root
 
 from tqdm import tqdm
 
+from torch.profiler import profile, record_function, ProfilerActivity
 
-def train_parallel_models(models_dict, train_dataset, onehop_dataset, twohop_dataset, args, output_dirs=None, dl_workers = 25):
+from threading import Thread
+from queue import Queue
+
+
+def train_model_thread(model, optimizer, scheduler, cuda_device, stream, batch_queue, error_queue, thread_id):
+    try:
+        print(f"Thread {thread_id} for GPU {cuda_device} started")
+        while True:
+            batch = batch_queue.get(timeout=10)
+            if batch is None:  # poison pill
+                print(f"Thread for GPU {cuda_device} received exit signal")
+                break  # This should exit the while loop immediately
+            
+            # Move batch to appropriate device
+            batch = {k: v.to(cuda_device) if hasattr(v, 'to') else v 
+                    for k, v in batch.items()}
+            del batch['text']
+                
+            with torch.cuda.stream(stream):
+                outputs = model(**batch)
+                loss = outputs.loss
+                loss.backward()
+                optimizer.step()
+                scheduler.step()
+                optimizer.zero_grad()
+
+    except Exception as e:
+        import traceback
+        error_msg = f"Error in thread {thread_id} for GPU {cuda_device}:\n{str(e)}\n{traceback.format_exc()}"
+        print(error_msg)
+        error_queue.put((cuda_device, error_msg))
+    # finally:
+    print(f"Thread {thread_id} for GPU {cuda_device} exiting")
+    torch.cuda.current_stream(cuda_device).synchronize()
+
+def train_parallel_models(
+        models_dict, 
+        train_dataset, 
+        onehop_dataset, 
+        twohop_dataset, 
+        args, 
+        output_dirs=None, 
+        dl_workers = 20):
     early_saves = set([int(math.exp(i)) for i in torch.linspace(math.log(100), math.log(100000), 10).tolist()])
     
     # Assign each model to a different GPU
@@ -80,8 +123,23 @@ def train_parallel_models(models_dict, train_dataset, onehop_dataset, twohop_dat
     # Initialize logging
     log_file = os.path.join('./logs', f"training_log_{datetime.now().strftime('%Y%m%d_%H%M%S')}.jsonl")
 
-    cuda_streams = {device: torch.cuda.Stream(device=device) for device in args.gpus}
+    cuda_streams = {i: torch.cuda.Stream(device=device) for i, device in enumerate(args.gpus)}
 
+    batch_queues = [Queue() for _ in args.gpus]
+    error_queue = Queue()
+    threads = []
+
+    # Create and start threads
+    for i, (cuda_device, (model, optimizer, scheduler)) in enumerate(zip(args.gpus, zip(models, optimizers, schedulers))):
+        thread = Thread(
+            target=train_model_thread,
+            args=(model, optimizer, scheduler, cuda_device, 
+                  cuda_streams[i], batch_queues[i], error_queue, i)
+        )
+        thread.start()
+        threads.append(thread)
+
+    # Training loop
     for epoch in range(args.num_epochs):
         # Training mode
         [model.train() for model in models]
@@ -90,64 +148,47 @@ def train_parallel_models(models_dict, train_dataset, onehop_dataset, twohop_dat
 
         pbar = tqdm(train_loader, desc=f"Epoch {epoch}")
         for batch in pbar:
-            losses = []
-            # Process models in parallel using async CUDA operations
-            for cuda_device, (model, optimizer, scheduler) in zip(args.gpus, zip(models, optimizers, schedulers)):
-                with torch.cuda.stream(cuda_streams[cuda_device]):
-                    optimizer.zero_grad()
-                    
-                    outputs = model(
-                        input_ids=batch['input_ids'].to(f'cuda:{cuda_device}', non_blocking=True),
-                        labels=batch['labels'].to(f'cuda:{cuda_device}', non_blocking=True)
-                    )
-                    
-                    loss = outputs.loss
-                    losses.append(loss.item())
-                    loss.backward()
-                    torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-                    optimizer.step()
-                    if scheduler:
-                        scheduler.step()
+            # Check for errors
+            if not error_queue.empty():
+                device, error = error_queue.get()
+                raise RuntimeError(f"Error in thread for GPU {device}: {error}")
 
-            # Only synchronize when we need to update the progress bar
-            if global_step % 100 == 0:  # Update progress less frequently
-                torch.cuda.synchronize()
-                avg_loss = sum(losses) / len(losses)
-                pbar.set_postfix({'avg_loss': avg_loss, 'step': global_step})
-                log_entry = {
-                    'step': global_step,
-                    'epoch': epoch,
-                    'train_loss': avg_loss,
-                    'timestamp': datetime.now().isoformat()
-                }
-                with open(log_file, 'a') as f:
-                    f.write(json.dumps(log_entry) + '\n')
-            
-                pbar.set_postfix({'loss': avg_loss, 'step': global_step})
-            
+            # Distribute batches to all GPUs
+            for queue in batch_queues:
+                queue.put(batch)
+
             global_step += 1
 
             should_save = (global_step < 100000 and global_step in early_saves) or \
-                         (global_step >= 100000 and global_step % 100000 == 0)
+                (global_step >= 100000 and global_step % 100000 == 0)
+            
             if should_save:
                 torch.cuda.synchronize()
+
+                log_entry = {
+                    'step': global_step,
+                    'epoch': epoch,
+                    'timestamp': datetime.now().isoformat()
+                }
+
                 # Evaluation mode
                 [model.eval() for model in models]
                 if hasattr(optimizers[0], 'eval'):
                     [optimizer.eval() for optimizer in optimizers]
                 
-                results_dicts.append(evaluate_models(models_dict, onehop_loader, global_step, 1))
-                results_dicts.append(evaluate_models(models_dict, twohop_loader, global_step, 2))
+                steps = [optimizer.state_dict()['state'][0]['step'].item() for optimizer in optimizers]
+
+                results_dicts.append(evaluate_models(models_dict, onehop_loader, steps, 1))
+                results_dicts.append(evaluate_models(models_dict, twohop_loader, steps, 2))
 
                 # Save checkpoints using HF interface
                 for i, (model, optimizer, scheduler) in enumerate(zip(models, optimizers, schedulers)):
                     model_path = f"{output_dirs[i]}/checkpoint-{global_step}"
                     model.save_pretrained(model_path)
-                    
                     # Save optimizer and scheduler state separately
                     optimizer_state = {
                         'optimizer_state_dict': optimizer.state_dict(),
-                        'step': global_step,
+                        'step': optimizer.state_dict()['state'][0]['step'].item(),
                         'onehop_loss': results_dicts[-2]['loss'][i],
                         'twohop_loss': results_dicts[-1]['loss'][i]
                     }
@@ -155,8 +196,8 @@ def train_parallel_models(models_dict, train_dataset, onehop_dataset, twohop_dat
                         optimizer_state['scheduler_state_dict'] = scheduler.state_dict()
                     torch.save(optimizer_state, f"{model_path}/optimizer.pt")
                 
-                results_df = pd.DataFrame(results_dicts)
-                results_df.to_csv(f"{output_dirs[i]}/eval_results.csv", index=False)
+                    results_df = pd.DataFrame(results_dicts)
+                    results_df.to_csv(f"{output_dirs[i]}/eval_results.csv", index=False)
                 # Back to training mode
                 [model.train() for model in models]
                 if hasattr(optimizers[0], 'train'):
@@ -168,9 +209,29 @@ def train_parallel_models(models_dict, train_dataset, onehop_dataset, twohop_dat
                     'twohop_loss': results_dicts[-1]['loss'],
                     'parameter_l2': results_dicts[-1]['parameter_l2']
                 })
+
+                pbar.set_postfix({'onehop_loss': results_dicts[-2]['loss'], 'twohop_loss': results_dicts[-1]['loss'], 'step': global_step})
+                with open(log_file, 'a') as f:
+                    f.write(json.dumps(log_entry) + '\n')
             
 
-def evaluate_models(models_dict, eval_loader, global_step, hop_count):
+    print("Sending poison pills")
+    # Send poison pills to stop threads
+    for queue in batch_queues:
+        queue.put(None)
+
+    # Wait for all threads to finish
+    for thread in threads:
+        thread.join()
+
+    # Final error check
+    if not error_queue.empty():
+        device, error = error_queue.get()
+        raise RuntimeError(f"Error in thread for GPU {device}: {error}")
+
+        
+
+def evaluate_models(models_dict, eval_loader, global_steps, hop_count):
     results_dict = {
         'loss': [0, 0, 0, 0],
         'num_params': [],
@@ -200,18 +261,16 @@ def evaluate_models(models_dict, eval_loader, global_step, hop_count):
 
             for i, model in enumerate(models_dict['model']):
                 outputs = model(
-                    input_ids=filtered_inputs.to(f'cuda:{i}'),
-                    labels=filtered_labels.to(f'cuda:{i}')
+                    input_ids=filtered_inputs.to(model.device),
+                    labels=filtered_labels.to(model.device)
                 )
                 
                 results_dict['loss'][i] += outputs.loss.item() * is_pos.sum().item()
                 
-                results_dict.update({
-                    k: models_dict[k][i] for k in 
-                    ['num_params', 'num_layers', 'N_profiles', 'orders', 'wd', 'lr', 'beta1']
-                })
+                for k in ['num_params', 'num_layers', 'N_profiles', 'orders', 'wd', 'lr', 'beta1']:
+                    results_dict[k].append(models_dict[k][i])
                 
-                results_dict['global_step'].append(global_step)
+                results_dict['global_step'].append(global_steps[0])
                 all_params = torch.cat([p.flatten() for p in model.parameters()])
                 results_dict['parameter_l2'].append(torch.norm(all_params).item() / np.sqrt(all_params.numel()))
             
@@ -221,7 +280,7 @@ def evaluate_models(models_dict, eval_loader, global_step, hop_count):
     
     for i, loss in enumerate(results_dict['loss']):
         results_dict['loss'][i] = loss / eval_questions
-    print(f"Step {global_step}: Evaluation Loss = {results_dict['loss']}")
+    print(f"Steps {global_steps}: Evaluation Loss = {results_dict['loss']}")
     return results_dict
 
 def get_qa_token_ranges(text: str, tokenizer) -> List[int]:
@@ -238,7 +297,7 @@ def get_qa_token_ranges(text: str, tokenizer) -> List[int]:
     if len(prefix_tokens) > 1 and prefix_tokens[-1] != full_tokens[len(prefix_tokens)-1]:
         prefix_tokens = prefix_tokens[:-1]
 
-    return list(range(len(prefix_tokens), len(full_tokens)))
+    return [len(prefix_tokens), len(full_tokens)-1]
 
 
 class LogConstantCheckpointCallback(TrainerCallback):
@@ -256,24 +315,42 @@ class LogConstantCheckpointCallback(TrainerCallback):
             control.should_evaluate = True
         return control
 
-class InfiniteBiosDataset(IterableDataset):
-    def __init__(self, profiles_dataset, tokenizer, max_seq_len=512, orders=[1,2], qa_prob=0.5, qa_indices = []):
+class InfiniteQADataset(IterableDataset):
+    def __init__(self, profiles_dataset, tokenizer, max_seq_len=512, orders=[1,2], qa_indices = []):
         self.profiles = profiles_dataset
         self.tokenizer = tokenizer
         self.max_seq_len = max_seq_len
-        self.samples_per_yield = math.ceil((max_seq_len//75)*(1-qa_prob) + (max_seq_len//20)*qa_prob)
+        self.samples_per_yield = (max_seq_len//20)
         self.orders = orders
-        self.qa_prob = qa_prob
         self.templates = load_templates(get_project_root() / "generated_data/templates")
         self.qa_indices = qa_indices
         self.order_weights = [10**i for i in range(len(orders))]
+        self.worker_id = None
+        self.num_workers = None
+        self.answer_sep_tokens = tokenizer('Answer:', add_special_tokens=False)['input_ids']
+        self.eos_token = tokenizer.eos_token or "<|endoftext|>"
+        self.question_sep_tokens = tokenizer(self.eos_token, add_special_tokens=False)['input_ids']
 
     def __len__(self):
         return len(self.qa_indices)
 
     def __iter__(self):
-        steps = 0
-        while steps <= len(self.qa_indices):  # Stop after one "epoch"
+        # Get worker info
+        worker_info = torch.utils.data.get_worker_info()
+        if worker_info is not None:
+            self.worker_id = worker_info.id
+            self.num_workers = worker_info.num_workers
+        else:
+            self.worker_id = 0
+            self.num_workers = 1
+
+        # Calculate this worker's portion of steps
+        worker_steps = len(self.qa_indices) // self.num_workers
+        start_step = self.worker_id * worker_steps
+        end_step = start_step + worker_steps if self.worker_id < self.num_workers - 1 else len(self.qa_indices)
+
+        steps = start_step
+        while steps < end_step:  # Each worker processes its portion
             steps += 1
             # But the next epoch will yield different samples
             # Generate multiple samples (either bios or QA)
@@ -281,21 +358,9 @@ class InfiniteBiosDataset(IterableDataset):
             answer_token_ranges = []
             
             for _ in range(self.samples_per_yield):
-                if random.random() < self.qa_prob:
-                    if question := self.generate_qa():
-                        texts.append(question)
-                        # Calculate answer ranges only if tokenizer exists
-                        if self.tokenizer:
-                            answer_token_ranges.append(get_qa_token_ranges(question, self.tokenizer))
-                else:
-                    # Generate bio
-                    profile_idx = random.randrange(len(self.profiles))
-                    profile = self.profiles[profile_idx]
-                    bio = generate_bio(profile, self.templates)
-                    texts.append(bio)
-                    if self.tokenizer:
-                        answer_token_ranges.append(list(range(len(bio))))
-            
+                question = self.generate_qa()
+                texts.append(question)
+
             # If no tokenizer provided, just return the text chunk
             if self.tokenizer is None:
                 yield {"text": "\n".join(texts)}
@@ -303,7 +368,7 @@ class InfiniteBiosDataset(IterableDataset):
             
             # Tokenizer-dependent processing
             sep = self.tokenizer.eos_token or "<|endoftext|>"
-            joined_text = sep.join(texts)  # Start with separator
+            joined_text = sep.join(texts)
             output = self.tokenizer(
                 joined_text,
                 max_length=self.max_seq_len,
@@ -311,32 +376,12 @@ class InfiniteBiosDataset(IterableDataset):
                 truncation=True,
                 return_tensors="pt"
             )
-            # First tokenize each text and create its labels
-            individual_labels = []
-            for i, at_range in enumerate(answer_token_ranges):
-                labels = [-100] * (at_range[-1] + 1)
-                labels[at_range[0]:] = [1] * (len(labels) - at_range[0])
-                individual_labels.extend(labels)
-            
-            # Insert sep tokens at max_seq_len intervals
-            sep_tokens = self.tokenizer(sep, return_attention_mask=False, add_special_tokens=False)["input_ids"]
-            final_labels = []
-            for i in range(0, len(individual_labels), self.max_seq_len):
-                if i > 0:  # Add separator at the start of each chunk except first
-                    final_labels.extend([-100] * len(sep_tokens))
-                final_labels.extend(individual_labels[i:i + self.max_seq_len])
-            
-            # Split into chunks
-            chunked_labels = [final_labels[i:i + self.max_seq_len] 
-                            for i in range(0, len(final_labels), self.max_seq_len)]
-            chunked_labels = chunked_labels[:len(output["input_ids"])]
-            for j, (labels_chunk, ids_chunk) in enumerate(zip(chunked_labels, output["input_ids"])):
-                for i, (l, id) in enumerate(zip(labels_chunk, ids_chunk)):
-                    if l == 1:
-                        chunked_labels[j][i] = id
-            chunked_labels = torch.tensor(chunked_labels)
 
-            yield {"input_ids": output["input_ids"].squeeze(0), "text": joined_text, "labels": chunked_labels.squeeze(0)}
+
+            labels = self._create_labels_fast(answer_token_ranges, output["input_ids"])
+
+
+            yield {"input_ids": output["input_ids"].squeeze(0), "text": joined_text, "labels": labels.squeeze(0)}
 
     def generate_qa(self):
         profile_idx = random.choice(self.qa_indices)
@@ -346,6 +391,41 @@ class InfiniteBiosDataset(IterableDataset):
         if question:
             return f"Question: {question['question']} Answer: {question['answer']}"
         return None
+
+    def _create_labels_fast(self, answer_token_ranges, input_ids):
+        """Create labels by masking everything except answers"""
+        # Initialize mask as zeros
+        mask = torch.zeros_like(input_ids, dtype=torch.bool)
+        
+        # Find starts (Answer:) - need all tokens to match
+        starts = torch.all(torch.stack([
+            input_ids.roll(-i) == token 
+            for i, token in enumerate(self.answer_sep_tokens)
+        ]), dim=0)
+        
+        # Find ends (EOS token)
+        ends = input_ids == self.question_sep_tokens[0]
+        # Convert to indices
+        start_indices = torch.where(starts)[1]
+        end_indices = torch.where(ends)[1] + len(self.question_sep_tokens)-1
+
+        if start_indices[0] > end_indices[0]:
+            end_indices = end_indices[1:]
+        if start_indices[-1] > end_indices[-1]:
+            start_indices = start_indices[:-1]
+        if len(start_indices) != len(end_indices):
+            end_indices = torch.cat([end_indices, torch.tensor([input_ids.shape[1]])])
+
+        # Set mask between each start and its corresponding end
+        for start, end in zip(start_indices, end_indices):
+            if start < end:  # safety check
+                mask[0, start+len(self.answer_sep_tokens):end] = True
+        
+        # Create labels by copying input_ids and masking
+        labels = input_ids.clone()
+        labels[~mask] = -100
+        
+        return labels
 
 
 def calculate_model_size(num_params):

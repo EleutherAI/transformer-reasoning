@@ -101,7 +101,7 @@ def compare_tokenizers(texts, custom_tokenizer, baseline_tokenizer):
 
 if __name__ == "__main__":
     from datasets import load_dataset
-    from transformer_reasoning.train.train_utils import InfiniteBiosDataset
+    from transformer_reasoning.train.train_utils import InfiniteQADataset
     parser = argparse.ArgumentParser()
     parser.add_argument("--N", type=int, default=10000)
     args = parser.parse_args()
@@ -110,7 +110,7 @@ if __name__ == "__main__":
     profiles_dataset = load_dataset(f"EleutherAI/profiles_dataset_{args.N}_uniform")["train"]
     
     # Create InfiniteBiosDataset instance
-    infinite_dataset = InfiniteBiosDataset(
+    infinite_dataset = InfiniteQADataset(
         profiles_dataset, 
         None, 
         max_seq_len=512,

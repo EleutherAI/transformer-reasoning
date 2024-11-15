@@ -11,7 +11,7 @@ import glob
 import os
 
 from transformer_reasoning.utils import get_project_root
-from transformer_reasoning.train.train_utils import create_model_and_tokenizer, InfiniteBiosDataset, train_parallel_models
+from transformer_reasoning.train.train_utils import create_model_and_tokenizer, InfiniteQADataset, train_parallel_models
 
 
 def test_checkpoint_eval_consistency():
@@ -19,7 +19,7 @@ def test_checkpoint_eval_consistency():
     model, tokenizer, num_params = create_model_and_tokenizer(1000000, num_layers=4)
     profiles = load_dataset("EleutherAI/profiles_dataset_10000_uniform")['train']
     
-    train_dataset = InfiniteBiosDataset(
+    train_dataset = InfiniteQADataset(
         profiles_dataset=profiles,
         tokenizer=tokenizer,
         max_seq_len=512,
@@ -29,7 +29,7 @@ def test_checkpoint_eval_consistency():
     )
     
     # Create dummy eval datasets (required by train_parallel_models)
-    onehop_dataset = InfiniteBiosDataset(
+    onehop_dataset = InfiniteQADataset(
         profiles_dataset=profiles,
         tokenizer=tokenizer,
         max_seq_len=512,
@@ -38,7 +38,7 @@ def test_checkpoint_eval_consistency():
         qa_indices=list(range(1000))
     )
     
-    twohop_dataset = InfiniteBiosDataset(
+    twohop_dataset = InfiniteQADataset(
         profiles_dataset=profiles,
         tokenizer=tokenizer,
         max_seq_len=512,

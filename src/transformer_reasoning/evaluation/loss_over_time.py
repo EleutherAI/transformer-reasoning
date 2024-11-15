@@ -10,7 +10,7 @@ from transformer_reasoning.evaluation.eval_utils import (
     filename_schemes
 )
 from transformer_reasoning.evaluation.qa_evaluation import evaluate_qa_loss
-from transformer_reasoning.train.train_utils import InfiniteBiosDataset
+from transformer_reasoning.train.train_utils import InfiniteQADataset
 import pandas as pd
 from pandas import DataFrame
 from transformer_reasoning.utils import get_project_root
@@ -59,14 +59,14 @@ def evaluate_checkpoints(
         size=num_samples, 
         replace=False
     )
-    qa_dataset_1 = iter(InfiniteBiosDataset(
+    qa_dataset_1 = iter(InfiniteQADataset(
         profiles_dataset, 
         tokenizer, 
         orders=[1], 
         qa_prob=1, 
         qa_indices=eval_indices.tolist()
     ))
-    qa_dataset_2 = iter(InfiniteBiosDataset(
+    qa_dataset_2 = iter(InfiniteQADataset(
         profiles_dataset, 
         tokenizer, 
         orders=[2], 

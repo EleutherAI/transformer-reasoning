@@ -5,7 +5,7 @@ from transformers import (
     LlamaForCausalLM
 )
 from datasets import load_dataset
-from transformer_reasoning.train.train_utils import calculate_model_size, create_model_and_tokenizer, InfiniteBiosDataset, train_parallel_models
+from transformer_reasoning.train.train_utils import calculate_model_size, create_model_and_tokenizer, InfiniteQADataset, train_parallel_models
 
 import glob
 import os
@@ -15,30 +15,27 @@ def load_and_prepare_datasets(tokenizer, N=250000, qa_ratio=0.1, orders=None):
     # Load profiles dataset
     profiles = load_dataset(f"EleutherAI/profiles_dataset_{N}_uniform", keep_in_memory=True)['train']
     # Create infinite training dataset
-    train_dataset = InfiniteBiosDataset(
+    train_dataset = InfiniteQADataset(
         profiles_dataset=profiles,
         tokenizer=tokenizer,
         max_seq_len=512,
         orders=orders or [1,2],
-        qa_prob=1,
         qa_indices=list(range(len(profiles)))
     )
     
-    onehop_dataset = InfiniteBiosDataset(
+    onehop_dataset = InfiniteQADataset(
         profiles_dataset=profiles,
         tokenizer=tokenizer,
         max_seq_len=512,
         orders=[1],
-        qa_prob=1,
         qa_indices=list(range(len(profiles)))
     )
 
-    twohop_dataset = InfiniteBiosDataset(
+    twohop_dataset = InfiniteQADataset(
         profiles_dataset=profiles,
         tokenizer=tokenizer,
         max_seq_len=512,
         orders=[2],
-        qa_prob=1,
         qa_indices=list(range(len(profiles)))
     )
     return train_dataset, onehop_dataset, twohop_dataset
@@ -68,8 +65,11 @@ def main(args):
         'beta1':[],
     }
     output_dirs = []
+    sf_str = "schedulefree" if args.schedule_free else "adamw"
     for nominal_param_count in args.num_params:
         model, tokenizer, real_num_params = create_model_and_tokenizer(nominal_param_count, args.num_layers)
+        # Convert model to bfloat16
+        model = model.to(dtype=torch.bfloat16)
         models_dict['model'].append(model)
         models_dict['num_params'].append(real_num_params)
         models_dict['num_layers'].append(args.num_layers)
@@ -78,7 +78,7 @@ def main(args):
         models_dict['wd'].append(args.wd)
         models_dict['lr'].append(args.lr)
         models_dict['beta1'].append(args.beta1)
-        output_dirs.append(f"./results/n{args.N}_p{real_num_params}_omin{min(args.orders)}_omax{max(args.orders)}_wd{args.wd}_l{args.num_layers}_lr{args.lr}_beta1{args.beta1}")
+        output_dirs.append(f"./results/n{args.N}_p{real_num_params}_omin{min(args.orders)}_omax{max(args.orders)}_wd{args.wd}_l{args.num_layers}_lr{args.lr}_beta1{args.beta1}_{sf_str}")
 
     if args.resume_from:
         for i, base_dir in enumerate(output_dirs):
@@ -86,10 +86,6 @@ def main(args):
             latest_checkpoint = sorted(checkpoints, key=lambda x: int(x.split("-")[-1]))[-1]
             print(f"Loading model from checkpoint: {latest_checkpoint}")
             models_dict['model'][i] = LlamaForCausalLM.from_pretrained(latest_checkpoint)
-    else:
-        for i in range(len(args.num_params)):
-            model, tokenizer, real_num_params = create_model_and_tokenizer(args.num_params[i], args.num_layers)
-            models_dict['model'][i] = model
 
     train_dataset, onehop_dataset, twohop_dataset = load_and_prepare_datasets(
         tokenizer, args.N, args.qa_ratio, args.orders
@@ -103,7 +99,7 @@ def main(args):
     # Set up training arguments
     train_parallel_models(models_dict, train_dataset, onehop_dataset, twohop_dataset, args, output_dirs)
 
-    hub_ids = [f"EleutherAI/llama_multihop_n{args.N}_p{real_num_params}_omin{min(args.orders)}_omax{max(args.orders)}_wd{args.wd}_l{args.num_layers}_lr{args.lr}_beta1{args.beta1}" 
+    hub_ids = [f"EleutherAI/llama_multihop_n{args.N}_p{real_num_params}_omin{min(args.orders)}_omax{max(args.orders)}_wd{args.wd}_l{args.num_layers}_lr{args.lr}_beta1{args.beta1}_{sf_str}" 
                for real_num_params in models_dict['num_params']]
     # Save the model
     for i in range(len(args.num_params)):
@@ -128,7 +124,7 @@ if __name__ == "__main__":
     parser.add_argument("--eval_batch_size", type=int, default=32, help="Batch size for evaluation")
     parser.add_argument("--schedule_free", action="store_true", help="Use schedule-free training")
     parser.add_argument("--num_layers", type=int, default=4, help="Number of layers in the model")
-    parser.add_argument("--lr", type=float, default=1e-4, help="Learning rate")
+    parser.add_argument("--lr", type=float, default=5e-4, help="Learning rate")
     parser.add_argument("--beta1", type=float, default=0.9, help="Beta1 for AdamW optimizer")
     parser.add_argument("--gpus", type=int, nargs="+", default=[0, 1, 2, 3], help="GPUs to use for training")
     parser.add_argument("--num_epochs", type=int, default=9000, help="Number of epochs to train for")
