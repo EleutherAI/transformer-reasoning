@@ -332,7 +332,7 @@ class InfiniteQADataset(IterableDataset):
         self.question_sep_tokens = tokenizer(self.eos_token, add_special_tokens=False)['input_ids']
 
     def __len__(self):
-        return len(self.qa_indices)
+        return len(self.qa_indices*10)
 
     def __iter__(self):
         # Get worker info
@@ -345,9 +345,9 @@ class InfiniteQADataset(IterableDataset):
             self.num_workers = 1
 
         # Calculate this worker's portion of steps
-        worker_steps = len(self.qa_indices) // self.num_workers
+        worker_steps = len(self.qa_indices) * 10 // self.num_workers
         start_step = self.worker_id * worker_steps
-        end_step = start_step + worker_steps if self.worker_id < self.num_workers - 1 else len(self.qa_indices)
+        end_step = start_step + worker_steps if self.worker_id < self.num_workers - 1 else len(self.qa_indices) * 10
 
         steps = start_step
         while steps < end_step:  # Each worker processes its portion
