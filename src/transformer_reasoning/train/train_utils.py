@@ -36,86 +36,47 @@ from threading import Thread
 from queue import Queue
 
 
-def train_model_thread(model, optimizer, scheduler, cuda_device, stream, batch_queue, error_queue, thread_id):
-    try:
-        print(f"Thread {thread_id} for GPU {cuda_device} started")
-        while True:
-            batch = batch_queue.get(timeout=10)
-            if batch is None:  # poison pill
-                print(f"Thread for GPU {cuda_device} received exit signal")
-                break  # This should exit the while loop immediately
-            
-            # Move batch to appropriate device
-            batch = {k: v.to(cuda_device) if hasattr(v, 'to') else v 
-                    for k, v in batch.items()}
-            del batch['text']
-                
-            with torch.cuda.stream(stream):
-                outputs = model(**batch)
-                loss = outputs.loss
-                loss.backward()
-                optimizer.step()
-                scheduler.step()
-                optimizer.zero_grad()
-
-    except Exception as e:
-        import traceback
-        error_msg = f"Error in thread {thread_id} for GPU {cuda_device}:\n{str(e)}\n{traceback.format_exc()}"
-        print(error_msg)
-        error_queue.put((cuda_device, error_msg))
-    # finally:
-    print(f"Thread {thread_id} for GPU {cuda_device} exiting")
-    torch.cuda.current_stream(cuda_device).synchronize()
-
-def train_parallel_models(
-        models_dict, 
+def train_single_model(
+        model, 
         train_dataset, 
         onehop_dataset, 
         twohop_dataset, 
-        args, 
-        output_dirs=None, 
-        dl_workers = 20):
+        args,
+        output_dir=None):
     early_saves = set([int(math.exp(i)) for i in torch.linspace(math.log(100), math.log(100000), 10).tolist()])
     
-    # Assign each model to a different GPU
-    models = [model.to(f'cuda:{cuda_device}') for cuda_device, model in zip(args.gpus, models_dict['model'])]
+    device = 'cuda' if torch.cuda.is_available() else 'cpu'
+    model = model.to(device)
     
-    # Create or load optimizers
-    optimizers = []
-    schedulers = []
+    # Create or load optimizer
     start_step = 0
-    for i, model in enumerate(models):
-        latest_checkpoint = None
-        if args.resume_from_checkpoint and output_dirs:
-            for i, base_dir in enumerate(output_dirs):
-                checkpoints = glob.glob(os.path.join(base_dir, "checkpoint-*"))
+    latest_checkpoint = None
+    if args.resume_from_checkpoint and output_dir:
+        checkpoints = glob.glob(os.path.join(output_dir, "checkpoint-*"))
+        if checkpoints:
             latest_checkpoint = sorted(checkpoints, key=lambda x: int(x.split("-")[-1]))[-1]
-        optimizer, scheduler, step = create_or_load_optimizer(model, args, latest_checkpoint)
-        optimizers.append(optimizer)
-        schedulers.append(scheduler)
-        if step > start_step:
-            start_step = step
+    optimizer, scheduler, start_step = create_or_load_optimizer(model, args, latest_checkpoint)
     
     global_step = start_step
     
     train_loader = DataLoader(
         train_dataset,
         batch_size=args.train_batch_size,
-        num_workers=dl_workers,
+        num_workers=args.num_workers,
         pin_memory=True
     )
     
     onehop_loader = DataLoader(
         onehop_dataset,
         batch_size=args.eval_batch_size,
-        num_workers=dl_workers,
+        num_workers=args.num_workers,
         pin_memory=True
     )
 
     twohop_loader = DataLoader(
         twohop_dataset,
         batch_size=args.eval_batch_size,
-        num_workers=dl_workers,
+        num_workers=args.num_workers,
         pin_memory=True
     )
     
@@ -123,48 +84,34 @@ def train_parallel_models(
     # Initialize logging
     log_file = os.path.join('./logs', f"training_log_{datetime.now().strftime('%Y%m%d_%H%M%S')}.jsonl")
 
-    cuda_streams = {i: torch.cuda.Stream(device=device) for i, device in enumerate(args.gpus)}
-
-    batch_queues = [Queue() for _ in args.gpus]
-    error_queue = Queue()
-    threads = []
-
-    # Create and start threads
-    for i, (cuda_device, (model, optimizer, scheduler)) in enumerate(zip(args.gpus, zip(models, optimizers, schedulers))):
-        thread = Thread(
-            target=train_model_thread,
-            args=(model, optimizer, scheduler, cuda_device, 
-                  cuda_streams[i], batch_queues[i], error_queue, i)
-        )
-        thread.start()
-        threads.append(thread)
-
     # Training loop
     for epoch in range(args.num_epochs):
-        # Training mode
-        [model.train() for model in models]
-        if hasattr(optimizers[0], 'train'):
-            [optimizer.train() for optimizer in optimizers]
+        model.train()
+        if hasattr(optimizer, 'train'):
+            optimizer.train()
 
         pbar = tqdm(train_loader, desc=f"Epoch {epoch}")
         for batch in pbar:
-            # Check for errors
-            if not error_queue.empty():
-                device, error = error_queue.get()
-                raise RuntimeError(f"Error in thread for GPU {device}: {error}")
-
-            # Distribute batches to all GPUs
-            for queue in batch_queues:
-                queue.put(batch)
-
+            batch = {k: v.to(model.device) if hasattr(v, 'to') else v 
+                    for k, v in batch.items()}
+            del batch['text']
+            
+            outputs = model(**batch)
+            loss = outputs.loss
+            
+            loss.backward()
+            optimizer.step()
+            if scheduler:
+                scheduler.step()
+            
+            optimizer.zero_grad()
+            
             global_step += 1
 
             should_save = (global_step < 100000 and global_step in early_saves) or \
                 (global_step >= 100000 and global_step % 100000 == 0)
             
             if should_save:
-                torch.cuda.synchronize()
-
                 log_entry = {
                     'step': global_step,
                     'epoch': epoch,
@@ -172,36 +119,35 @@ def train_parallel_models(
                 }
 
                 # Evaluation mode
-                [model.eval() for model in models]
-                if hasattr(optimizers[0], 'eval'):
-                    [optimizer.eval() for optimizer in optimizers]
+                model.eval()
+                if hasattr(optimizer, 'eval'):
+                    optimizer.eval()
                 
-                steps = [optimizer.state_dict()['state'][0]['step'].item() for optimizer in optimizers]
+                results_dicts.append(evaluate_single_model(model, onehop_loader, global_step, 1))
+                results_dicts.append(evaluate_single_model(model, twohop_loader, global_step, 2))
 
-                results_dicts.append(evaluate_models(models_dict, onehop_loader, steps, 1))
-                results_dicts.append(evaluate_models(models_dict, twohop_loader, steps, 2))
-
-                # Save checkpoints using HF interface
-                for i, (model, optimizer, scheduler) in enumerate(zip(models, optimizers, schedulers)):
-                    model_path = f"{output_dirs[i]}/checkpoint-{global_step}"
+                # Save checkpoint
+                if output_dir:
+                    model_path = f"{output_dir}/checkpoint-{global_step}"
                     model.save_pretrained(model_path)
-                    # Save optimizer and scheduler state separately
+                    # Save optimizer and scheduler state
                     optimizer_state = {
                         'optimizer_state_dict': optimizer.state_dict(),
-                        'step': optimizer.state_dict()['state'][0]['step'].item(),
-                        'onehop_loss': results_dicts[-2]['loss'][i],
-                        'twohop_loss': results_dicts[-1]['loss'][i]
+                        'step': global_step,
+                        'onehop_loss': results_dicts[-2]['loss'],
+                        'twohop_loss': results_dicts[-1]['loss']
                     }
                     if scheduler:
                         optimizer_state['scheduler_state_dict'] = scheduler.state_dict()
                     torch.save(optimizer_state, f"{model_path}/optimizer.pt")
                 
                     results_df = pd.DataFrame(results_dicts)
-                    results_df.to_csv(f"{output_dirs[i]}/eval_results.csv", index=False)
+                    results_df.to_csv(f"{output_dir}/eval_results.csv", index=False)
+                
                 # Back to training mode
-                [model.train() for model in models]
-                if hasattr(optimizers[0], 'train'):
-                    [optimizer.train() for optimizer in optimizers]
+                model.train()
+                if hasattr(optimizer, 'train'):
+                    optimizer.train()
             
                 # Add evaluation metrics to log
                 log_entry.update({
@@ -210,39 +156,19 @@ def train_parallel_models(
                     'parameter_l2': results_dicts[-1]['parameter_l2']
                 })
 
-                pbar.set_postfix({'onehop_loss': results_dicts[-2]['loss'], 'twohop_loss': results_dicts[-1]['loss'], 'step': global_step})
+                pbar.set_postfix({
+                    'onehop_loss': results_dicts[-2]['loss'], 
+                    'twohop_loss': results_dicts[-1]['loss'], 
+                    'step': global_step
+                })
                 with open(log_file, 'a') as f:
                     f.write(json.dumps(log_entry) + '\n')
-            
 
-    print("Sending poison pills")
-    # Send poison pills to stop threads
-    for queue in batch_queues:
-        queue.put(None)
-
-    # Wait for all threads to finish
-    for thread in threads:
-        thread.join()
-
-    # Final error check
-    if not error_queue.empty():
-        device, error = error_queue.get()
-        raise RuntimeError(f"Error in thread for GPU {device}: {error}")
-
-        
-
-def evaluate_models(models_dict, eval_loader, global_steps, hop_count):
+def evaluate_single_model(model, eval_loader, global_step, hop_count):
     results_dict = {
-        'loss': [0, 0, 0, 0],
-        'num_params': [],
-        'num_layers': [],
-        'N_profiles': [],
-        'orders': [],
-        'wd': [],
-        'lr': [],
-        'beta1': [],
-        'global_step': [],
-        'parameter_l2': []
+        'loss': 0,
+        'global_step': global_step,
+        'parameter_l2': 0
     }
 
     with torch.no_grad():
@@ -259,28 +185,22 @@ def evaluate_models(models_dict, eval_loader, global_steps, hop_count):
             block_starts = ((is_pos) & (~torch.roll(is_pos, 1))).sum()
             eval_questions += block_starts.item()
 
-            for i, model in enumerate(models_dict['model']):
-                outputs = model(
-                    input_ids=filtered_inputs.to(model.device),
-                    labels=filtered_labels.to(model.device)
-                )
-                
-                results_dict['loss'][i] += outputs.loss.item() * is_pos.sum().item()
-                
-                for k in ['num_params', 'num_layers', 'N_profiles', 'orders', 'wd', 'lr', 'beta1']:
-                    results_dict[k].append(models_dict[k][i])
-                
-                results_dict['global_step'].append(global_steps[0])
-                all_params = torch.cat([p.flatten() for p in model.parameters()])
-                results_dict['parameter_l2'].append(torch.norm(all_params).item() / np.sqrt(all_params.numel()))
+            outputs = model(
+                input_ids=filtered_inputs.to(model.device),
+                labels=filtered_labels.to(model.device)
+            )
+            
+            results_dict['loss'] += outputs.loss.item() * is_pos.sum().item()
+            
+            all_params = torch.cat([p.flatten() for p in model.parameters()])
+            results_dict['parameter_l2'] = torch.norm(all_params).item() / np.sqrt(all_params.numel())
             
             pbar.set_postfix({'eval_questions': eval_questions})
             if eval_questions >= 500:
                 break
     
-    for i, loss in enumerate(results_dict['loss']):
-        results_dict['loss'][i] = loss / eval_questions
-    print(f"Steps {global_steps}: Evaluation Loss = {results_dict['loss']}")
+    results_dict['loss'] = results_dict['loss'] / eval_questions
+    print(f"Step {global_step}: Evaluation Loss = {results_dict['loss']}")
     return results_dict
 
 def get_qa_token_ranges(text: str, tokenizer) -> List[int]:
