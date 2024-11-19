@@ -9,7 +9,7 @@ import numpy as np
 from math import ceil
 
 
-def calculate_entropy(values, attr, bipartite: bool = False, selection: bool = False, scheme: str = 'optimal'):
+def calculate_entropy(values, attr, bipartite: bool = False, selection: bool = False, scheme: str = 'optimal', n_profiles: int = None):
     # Calculate unique values for each component
     # scheme: 'optimal': use optimal encoding for names/birth_dates,
     #         'enumerate': enumerate all name/birth_date values, neglecting symmetries,
@@ -60,9 +60,15 @@ def calculate_entropy(values, attr, bipartite: bool = False, selection: bool = F
             days_between_dates = time_between_dates.days
             return math.log2(days_between_dates)
 
-    # Default case for other attributes
     unique_values = len(set(values))
+
+    if scheme == "2-hop-big-hash":
+        return math.log2(unique_values)*n_profiles
+
+    # Default case for other attributes
+
     return math.log2(unique_values)
+
 
 def analyze_dataset(N = None, bipartite: bool = False):    
     dataset_path = "profiles_dataset"
