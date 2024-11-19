@@ -98,7 +98,7 @@ if __name__ == "__main__":
     parser.add_argument("--lr", type=float, default=5e-4, help="Learning rate")
     parser.add_argument("--beta1", type=float, default=0.9, help="Beta1 for AdamW optimizer")
     parser.add_argument("--num_epochs", type=int, default=2000, help="Number of epochs to train for")
-    parser.add_argument("--optimizer_type", type=str, default="schedulefree", choices=["schedulefree", "adamw"],
+    parser.add_argument("--optimizer_type", type=str, default="schedulefree", choices=["schedulefree", "adamw_cosine", "adamw_linear"],
                         help="Type of optimizer to use (schedulefree or regular adamw with cosine scheduler)")
     parser.add_argument("--num_training_steps", type=int, default=9_000_000,
                         help="Total number of training steps (required for adamw cosine scheduler)")

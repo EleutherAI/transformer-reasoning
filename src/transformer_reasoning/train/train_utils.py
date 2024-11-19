@@ -21,7 +21,7 @@ T = TypeVar("T", bound=Union[Dataset, DatasetDict])
 from torch.utils.data import IterableDataset, DataLoader
 import random
 from schedulefree import AdamWScheduleFree
-from transformers import get_cosine_schedule_with_warmup
+from transformers import get_cosine_schedule_with_warmup, get_linear_schedule_with_warmup
 from torch.optim import AdamW as TorchAdamW
 
 from transformer_reasoning.generate_dataset.generate_bios import generate_bio, load_templates
@@ -196,7 +196,7 @@ def evaluate_single_model(model, eval_loader, global_step, hop_count):
             results_dict['parameter_l2'] = torch.norm(all_params).item() / np.sqrt(all_params.numel())
             
             pbar.set_postfix({'eval_questions': eval_questions})
-            if eval_questions >= 500:
+            if eval_questions >= 1000:
                 break
     
     results_dict['loss'] = results_dict['loss'] / eval_questions
@@ -500,18 +500,25 @@ def create_or_load_optimizer(model, args, checkpoint_path=None):
             warmup_steps=1000
         )
         scheduler = None
-    else:  # regular AdamW with cosine scheduler
+    else:  # regular AdamW with cosine or linear scheduler
         optimizer = TorchAdamW(
             model.parameters(),
             lr=args.lr,
             betas=(args.beta1, 0.999),
             weight_decay=args.wd
         )
-        scheduler = get_cosine_schedule_with_warmup(
-            optimizer,
-            num_warmup_steps=1000,
-            num_training_steps=args.num_training_steps
-        )
+        if args.optimizer_type == "adamw_cosine":
+            scheduler = get_cosine_schedule_with_warmup(
+                optimizer,
+                num_warmup_steps=1000,
+                num_training_steps=args.num_training_steps
+            )
+        else:  # linear decay
+            scheduler = get_linear_schedule_with_warmup(
+                optimizer,
+                num_warmup_steps=1000,
+                num_training_steps=args.num_training_steps
+            )
     
     start_step = 0
     if checkpoint_path:
