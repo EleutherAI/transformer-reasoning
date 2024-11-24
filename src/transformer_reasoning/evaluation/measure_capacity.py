@@ -1,5 +1,4 @@
 import torch
-from torch.nn import CrossEntropyLoss
 from datasets import load_from_disk, load_dataset
 from transformers import AutoTokenizer, AutoModelForCausalLM
 import re
@@ -14,15 +13,8 @@ from transformer_reasoning.evaluation.measure_entropy import calculate_entropy
 from transformer_reasoning.evaluation.eval_utils import get_qa_token_ranges, get_token_ranges, tokenwise_loss
 import matplotlib.pyplot as plt
 import pandas as pd
+import itertools
 
-def tokenwise_loss(inputs, logits):
-    # Shift so that tokens < n predict n
-    shift_labels = inputs[..., 1:].contiguous()
-    shift_logits = logits[..., :-1, :].contiguous()
-    # Calculate per-token loss
-    loss_fct = CrossEntropyLoss(reduce=False)
-    loss = loss_fct(shift_logits.view(-1, shift_logits.size(-1)), shift_labels.view(-1))
-    return loss
 
 def load_templates(template_dir) -> Dict[str, List[str]]:
     """Load all template files and return a dictionary of templates."""
@@ -158,7 +150,7 @@ def calculate_capacities(total_losses, dataset, N):
 
     return capacities, qa_capacity_2, qa_capacity_1
 
-def filename_schemes(order, N, num_parameters, wd, finite):
+def filename_schemes_old(order, N, num_parameters, wd, finite):
 
     if finite:
         continued_str = "continued_3" if (num_parameters != 1_000_000) and (wd == 0.1) else "continued_2"
@@ -176,11 +168,22 @@ def filename_schemes(order, N, num_parameters, wd, finite):
         return None
     return parent_dir
 
+def filename_schemes(min_order, max_order, N, num_parameters, wd, old=False, finite=False):
+    if old:
+        return filename_schemes_old(max_order, N, num_parameters, wd, finite)
+    else:
+        parent_dir = get_project_root() / f"results/n{N}_p{num_parameters}_omin{min_order}_omax{max_order}_wd{wd}_infinite"
+    if not parent_dir.exists():
+        print(f"Skipping {parent_dir} - path does not exist")
+        return None
+    return parent_dir
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--checkpoint", type=str, default="latest")
     parser.add_argument("--sample-size", type=int, default=1000)
     parser.add_argument("--finite", action="store_true")
+    parser.add_argument("--old", action="store_true")
     args = parser.parse_args()
 
     results = []
@@ -192,11 +195,11 @@ def main():
     for wd in wds:
         for num_parameters in param_sizes:
             for N in N_sizes:
-                for order in orders:
-                    print(f"\nEvaluating model with {num_parameters} parameters, N={N}, order={order}, weight decay={wd}")
+                for min_order, max_order in [(o1, o2) for o1, o2 in itertools.combinations_with_replacement(orders, 2) if o1 <= o2]:
+                    print(f"\nEvaluating model with {num_parameters} parameters, N={N}, min_order={min_order}, max_order={max_order}, weight decay={wd}")
                     
                     # Load model and tokenizer
-                    parent_dir = filename_schemes(order, N, num_parameters, wd, args.finite)
+                    parent_dir = filename_schemes(min_order, max_order, N, num_parameters, wd, args.old, args.finite)
                     if not parent_dir:
                         continue
 
@@ -309,7 +312,8 @@ def main():
                     results.append({
                         'num_params': num_parameters,
                         'N': N,
-                        'order': order,
+                        'min_order': min_order,
+                        'max_order': max_order,
                         'name_capacity': capacities['name'],
                         'other_bio_capacity': sum(capacities[attr] for attr in capacities if attr != 'name'),
                         'qa_capacity_2': qa_capacity_2,

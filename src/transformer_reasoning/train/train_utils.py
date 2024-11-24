@@ -13,9 +13,9 @@ T = TypeVar("T", bound=Union[Dataset, DatasetDict])
 
 from torch.utils.data import IterableDataset, DataLoader
 import random
-from transformer_reasoning.generate_dataset.generate_bios import generate_bio, load_templates
-from transformer_reasoning.generate_dataset.generate_qa_dataset import generate_question
-from transformer_reasoning.utils import get_project_root
+from ngrams_across_time.transformer_reasoning.src.transformer_reasoning.generate_dataset.generate_bios import generate_bio, load_templates
+from ngrams_across_time.transformer_reasoning.src.transformer_reasoning.generate_dataset.generate_qa_dataset import generate_question
+from ngrams_across_time.transformer_reasoning.src.transformer_reasoning.utils import get_project_root
 
 
 class LogConstantCheckpointCallback(TrainerCallback):
@@ -75,11 +75,11 @@ class InfiniteBiosDataset(IterableDataset):
             if overflow := output.pop("overflow_to_sample_mapping", None):
                 # Yield all chunks except possibly incomplete last one
                 for ids in output["input_ids"][:-1]:
-                    yield {"input_ids": ids, "text": joined_text}
+                    yield {"input_ids": torch.tensor(ids), "text": joined_text}
             else:
                 # If no overflow, yield the single chunk if it's full
                 if len(output["input_ids"][0]) == self.max_seq_len:
-                    yield {"input_ids": output["input_ids"], "text": joined_text}
+                    yield {"input_ids": torch.tensor(output["input_ids"]), "text": joined_text}
 
 
     def generate_qa(self):

@@ -4,7 +4,7 @@ import os
 import argparse
 from datetime import datetime
 
-from transformer_reasoning.utils import get_project_root
+from ngrams_across_time.transformer_reasoning.src.transformer_reasoning.utils import get_project_root
 
 RELATIONS = [
     'best_friend',

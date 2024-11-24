@@ -2,7 +2,7 @@ import argparse
 from datasets import load_from_disk, DatasetDict, Dataset
 import random
 from typing import List, Dict, Union
-from transformer_reasoning.utils import get_project_root
+from ngrams_across_time.transformer_reasoning.src.transformer_reasoning.utils import get_project_root
 import math
 import datetime
 import os
