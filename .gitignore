@@ -17,3 +17,10 @@ final_model*
 .vscode/
 .pytest_cache/
 *.csv
+*.pt
+*.json
+*.jsonl
+*.pkl
+*.pickle
+*.npy
+*.safetensors

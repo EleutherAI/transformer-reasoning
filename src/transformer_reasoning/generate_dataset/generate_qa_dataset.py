@@ -20,7 +20,7 @@ INVERSE_RELATIONS = {'parent': 'child', 'child': 'parent', 'best_friend': 'best_
 def get_available_relations(profile):
     return [rel for rel in RELATIONS if profile.get(rel)['name']]
 
-def generate_question(profile: Dict, profiles: Dataset, order: int, holdout_subjs: List[str], holdout_rels: List[str]) -> Union[Dict, None]:
+def generate_question(profile: Dict, profiles: Dataset, order: int, holdout_subjs: List[str], holdout_rels: List[str], subject: str = None) -> Union[Dict, None]:
     name = profile['name']
     available_relations = [rel for rel in get_available_relations(profile) if rel not in holdout_rels]
     available_subjects = [subj for subj in ATTRIBUTES + available_relations if subj not in holdout_subjs]
@@ -30,7 +30,8 @@ def generate_question(profile: Dict, profiles: Dataset, order: int, holdout_subj
     if order == 1:
         if not available_subjects:
             return None
-        subject = random.choice(available_subjects)
+        if not subject:
+            subject = random.choice(available_subjects)
         chosen_subject = subject
         question = FIRST_ORDER_TEMPLATE.format(name=name, subject=subject.replace('_', ' '))
         if subject in RELATIONS:
@@ -44,7 +45,8 @@ def generate_question(profile: Dict, profiles: Dataset, order: int, holdout_subj
         if profile[relation]['index']==-1:
             return None
         related_profile = profiles[profile[relation]['index']]
-        subject = random.choice(available_subjects)
+        if not subject:
+            subject = random.choice(available_subjects)
         chosen_subject = subject
         chosen_relations[1] = relation
         question = SECOND_ORDER_TEMPLATE.format(name=profile['name'], relation=relation.replace('_', ' '), subject=subject.replace('_', ' '))
@@ -59,7 +61,8 @@ def generate_question(profile: Dict, profiles: Dataset, order: int, holdout_subj
         relation1 = random.choice([rel for rel in available_relations])
         # Double inverse is the same relation; circular relations accepted
         relation2 = random.choice([rel for rel in available_relations])
-        subject = random.choice(available_subjects)
+        if not subject:
+            subject = random.choice(available_subjects)
         related_profile1 = profiles[profile[relation1]['index']]
         related_profile2 = profiles[related_profile1[relation2]['index']]
         if profile[relation2]['index']==-1 or related_profile2[relation1]['index']==-1:

@@ -236,11 +236,11 @@ class LogConstantCheckpointCallback(TrainerCallback):
         return control
 
 class InfiniteQADataset(IterableDataset):
-    def __init__(self, profiles_dataset, tokenizer, max_seq_len=512, orders=[1,2], qa_indices = []):
+    def __init__(self, profiles_dataset, tokenizer, max_seq_len=512, orders=[1,2], qa_indices = [], subjects=None):
         self.profiles = profiles_dataset
         self.tokenizer = tokenizer
         self.max_seq_len = max_seq_len
-        self.samples_per_yield = (max_seq_len//20)
+        self.samples_per_yield = (max_seq_len//15)
         self.orders = orders
         self.templates = load_templates(get_project_root() / "generated_data/templates")
         self.qa_indices = qa_indices
@@ -250,6 +250,7 @@ class InfiniteQADataset(IterableDataset):
         self.answer_sep_tokens = tokenizer('Answer:', add_special_tokens=False)['input_ids']
         self.eos_token = tokenizer.eos_token or "<|endoftext|>"
         self.question_sep_tokens = tokenizer(self.eos_token, add_special_tokens=False)['input_ids']
+        self.subjects = subjects
 
     def __len__(self):
         return len(self.qa_indices*10)
@@ -307,7 +308,8 @@ class InfiniteQADataset(IterableDataset):
         profile_idx = random.choice(self.qa_indices)
         profile = self.profiles[profile_idx]
         order = random.choices(self.orders, weights=self.order_weights, k=1)[0]
-        question, _ = generate_question(profile, self.profiles, order, {}, {})
+        subject = random.choice(self.subjects) if self.subjects else None
+        question, _ = generate_question(profile, self.profiles, order, {}, {}, subject)
         if question:
             return f"Question: {question['question']} Answer: {question['answer']}"
         return None

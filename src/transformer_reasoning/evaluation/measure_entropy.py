@@ -24,7 +24,7 @@ def calculate_entropy(values, attr, bipartite: bool = False, selection: bool = F
             last_names = set(value.split()[2] for value in values)
             N_names = len(first_names)*len(middle_names)*len(last_names)
             n_names = len(values)
-            if scheme == 'optimal':
+            if scheme in ['optimal', '2-hop-big-hash']:
                 name_selection_entropy = n_names * np.log2(N_names) - n_names * np.log2(n_names)
             elif scheme == 'enumerate':
                 name_selection_entropy = n_names * np.log2(N_names)
@@ -38,7 +38,7 @@ def calculate_entropy(values, attr, bipartite: bool = False, selection: bool = F
             time_between_dates = end_date - start_date
             days_between_dates = time_between_dates.days
 
-            if scheme == 'optimal':
+            if scheme in ['optimal', '2-hop-big-hash']:
                 birth_date_selection_entropy = len(values) * np.log2(days_between_dates) - len(values) * np.log2(len(values))
             elif scheme == 'enumerate':
                 birth_date_selection_entropy = len(values) * np.log2(days_between_dates)
@@ -62,11 +62,7 @@ def calculate_entropy(values, attr, bipartite: bool = False, selection: bool = F
 
     unique_values = len(set(values))
 
-    if scheme == "2-hop-big-hash":
-        return math.log2(unique_values)*n_profiles
-
     # Default case for other attributes
-
     return math.log2(unique_values)
 
 

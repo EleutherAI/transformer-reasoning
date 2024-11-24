@@ -1,4 +1,5 @@
 import torch
+from torch.utils.data import DataLoader
 import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib.colors import LogNorm
@@ -7,10 +8,11 @@ from typing import List, Dict, Optional
 import seaborn as sns
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from transformer_reasoning.evaluation.eval_utils import (
-    filename_schemes
+    get_checkpoints
 )
 from transformer_reasoning.evaluation.qa_evaluation import evaluate_qa_loss
-from transformer_reasoning.train.train_utils import InfiniteQADataset
+from transformer_reasoning.train.train_utils import InfiniteQADataset, evaluate_single_model
+from transformer_reasoning.generate_dataset.generate_qa_dataset import ATTRIBUTES, RELATIONS
 import pandas as pd
 from pandas import DataFrame
 from transformer_reasoning.utils import get_project_root
@@ -33,15 +35,12 @@ def evaluate_checkpoints(
     max_order: int,
     params: int,
     wd: float,
-    finite: bool = False,
-    checkpoints: list = [],
-    num_samples: int = 8000,
-) -> Dict[str, List[float]]:
+) -> DataFrame:
     """Evaluate loss for different tasks across checkpoints."""
     device = "cuda" if torch.cuda.is_available() else "cpu"
     
-    model_dir = filename_schemes(min_order, max_order, N, params, wd)
-    if not model_dir:
+    checkpoints = get_checkpoints(min_order, max_order, N, params, wd)
+    if not checkpoints:
         return None
 
     checkpoint_paths = checkpoints
@@ -54,80 +53,59 @@ def evaluate_checkpoints(
     tokenizer.pad_token = tokenizer.eos_token
     profiles_dataset = load_dataset(f"EleutherAI/profiles_dataset_{N}_uniform")['train']
     
-    eval_indices = np.random.RandomState(42).choice(
-        len(profiles_dataset), 
-        size=num_samples, 
-        replace=False
-    )
-    qa_dataset_1 = iter(InfiniteQADataset(
-        profiles_dataset, 
-        tokenizer, 
-        orders=[1], 
-        qa_prob=1, 
-        qa_indices=eval_indices.tolist()
-    ))
-    qa_dataset_2 = iter(InfiniteQADataset(
-        profiles_dataset, 
-        tokenizer, 
-        orders=[2], 
-        qa_prob=1, 
-        qa_indices=eval_indices.tolist()
-    ))
+    subjects = ATTRIBUTES + RELATIONS
+
+    all_results = []
+
+    for subject in subjects:
+        qa_dataset_1 = InfiniteQADataset(
+            profiles_dataset, 
+            tokenizer, 
+            orders=[1], 
+            qa_indices=range(len(profiles_dataset)),
+            subjects=[subject]
+        )
+        qa_dataset_2 = InfiniteQADataset(
+            profiles_dataset, 
+            tokenizer, 
+            orders=[2], 
+            qa_indices=range(len(profiles_dataset)),
+            subjects=[subject]
+        )
     
-    qa_data_1hop = []
-    qa_data_2hop = []
-    counter = 0
-    for qa_item_1, qa_item_2 in zip(qa_dataset_1, qa_dataset_2):
-        counter += 1
-        if counter > num_samples:
-            break
-        qa_data_1hop.append(qa_item_1)
-        qa_data_2hop.append(qa_item_2)
-    
-    results = {
-        "steps": [],
-        "l2_norm": [],
-        "model_min_hops": [],
-        "model_max_hops": [],
-        "model_params": [],
-        "model_wd": [],
-        "dataset_N": [],
-        "dataset_finite": [],
-    }
-    
-    results.update({
-        "qa_1hop_loss": [],
-        "qa_2hop_loss": [],
-    })
-    
-    for checkpoint_path in checkpoint_paths:
-        print(f"Evaluating checkpoint: {checkpoint_path}")
+        dataloader_1hop = DataLoader(qa_dataset_1, batch_size=16, shuffle=False, num_workers=15, pin_memory=True)
+        dataloader_2hop = DataLoader(qa_dataset_2, batch_size=16, shuffle=False, num_workers=15, pin_memory=True)
         
-        step = int(checkpoint_path.stem.split('-')[-1])
-        results["steps"].append(step)
+        results_dicts = []
         
-        model = AutoModelForCausalLM.from_pretrained(checkpoint_path).to(device)
-        all_params = torch.cat([p.flatten() for p in model.parameters()])
-        l2_norm = torch.norm(all_params).item() / np.sqrt(all_params.numel())
-        results["l2_norm"].append(l2_norm)
+        for checkpoint_path in checkpoint_paths:
+            if 'eval_results.csv' not in checkpoint_path:
+                print(f"Evaluating checkpoint: {checkpoint_path}, subject: {subject}")
+                    
+                step = int(checkpoint_path.split('-')[-1])
+                
+                model = AutoModelForCausalLM.from_pretrained(checkpoint_path).to(device)
+                
+                results_dict_1hop = evaluate_single_model(model, dataloader_1hop, step, 1)
+                results_dict_2hop = evaluate_single_model(model, dataloader_2hop, step, 2)
+                
+                results_dicts.append(results_dict_1hop)
+                results_dicts.append(results_dict_2hop)
+                
+                del model
+                torch.cuda.empty_cache()
         
-        qa_1hop_loss = evaluate_qa_loss(model, qa_data_1hop, device, num_samples)
-        qa_2hop_loss = evaluate_qa_loss(model, qa_data_2hop, device, num_samples)
-        results["qa_1hop_loss"].append(qa_1hop_loss)
-        results["qa_2hop_loss"].append(qa_2hop_loss)
-        print(f"qa_1hop_loss: {qa_1hop_loss}, qa_2hop_loss: {qa_2hop_loss}")
+        results = pd.DataFrame(results_dicts)
+        results['subject'] = subject
+        results['n_params'] = params
+        results['N_profiles'] = N
+        results['min_train_hops'] = min_order
+        results['max_train_hops'] = max_order
+        results['wd'] = wd
         
-        results["model_min_hops"].append(min_order)
-        results["model_max_hops"].append(max_order)
-        results["model_params"].append(params)
-        results["model_wd"].append(wd)
-        results["dataset_N"].append(N)
-        results["dataset_finite"].append(finite)
-        
-        del model
-        torch.cuda.empty_cache()
-    
-    return results
+        all_results.append(results)
+
+    return pd.concat(all_results)
 
 def plot_losses(all_results: DataFrame, save_path: Optional[str] = None):
     """Plot losses over training steps in a grid of subplots."""
@@ -205,89 +183,32 @@ def plot_losses(all_results: DataFrame, save_path: Optional[str] = None):
     plt.close()
 
 def main():
-    import argparse
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--num_checkpoints", type=int, default=20,
-                       help="Number of checkpoints to evaluate")
-    parser.add_argument("--num_samples", type=int, default=500,
-                       help="Number of samples to evaluate")
-    parser.add_argument("--recalculate", action="store_true",
-                       help="Recalculate results")
-    
-    args = parser.parse_args()
     wd = 0.1
-    new_results = []
     for N in [10000, 15000, 20000, 25000, 30000, 50000]:
-        csv_path = get_project_root() / f"results/loss_over_time_{N}_batched.csv"
-        results_df = pd.read_csv(csv_path) if csv_path.exists() else pd.DataFrame()
-        
+        full_results = []        
         for params in [435888, 890320, 1166688, 1475824]:
             for min_order in [1, 2]:
                 for max_order in range(min_order, 3):
-                    if csv_path.exists() and not args.recalculate:
-                        # Load existing results
-                        results_df_filtered = results_df[
-                            (results_df['model_min_hops'] == min_order) &
-                            (results_df['model_max_hops'] == max_order) &
-                            (results_df['model_params'] == params) &
-                            (results_df['model_wd'] == wd)
-                        ]
-
-                        last_step = results_df_filtered['steps'].max()
-                        if np.isnan(last_step):
-                            last_step = 0
-
-                    else:
-                        last_step = 0
-                    
-                    model_dir = filename_schemes(min_order, max_order, N, params, wd)
-                    if not model_dir:
-                        continue
-                        
-                    all_checkpoints = sorted(list(model_dir.glob("checkpoint-*")))
-                    
-
-
-                    print(f"Evaluating from step {last_step}")
-                    new_checkpoints = [cp for cp in all_checkpoints 
-                                        if int(cp.stem.split('-')[-1]) > last_step]
-                        
-                    if len(new_checkpoints) == 0:
-                        continue
-
-                    if (len(new_checkpoints) < args.num_checkpoints):
-                        checkpoints_to_evaluate = new_checkpoints
-                    else:
-                        cp_steps = [int(cp.stem.split('-')[-1]) for cp in new_checkpoints]
-                        num_checkpoints = int(args.num_checkpoints * (max(cp_steps) - last_step)/max(cp_steps))
-                        indices = np.linspace(0, len(new_checkpoints)-1, num_checkpoints, dtype=int)
-                        checkpoints_to_evaluate = [new_checkpoints[i] for i in indices]
-
                     result = evaluate_checkpoints(
                         N=N,
                         min_order=min_order,
                         max_order=max_order,
                         params=params,
                         wd=wd,
-                        checkpoints=checkpoints_to_evaluate,
-                        num_samples=args.num_samples,
                     )
                     
-                    if result:
-                        new_result_df = pd.DataFrame(result)
-                        # Original behavior for full evaluations
-                        new_results.append(new_result_df)
+                    if result is not None:
+                        result.to_csv(f'./results/n{N}_p{params}_omin{min_order}_omax{max_order}_wd{wd}_l4_lr0.001_beta10.99_sf/eval_results_full.csv')
+                        full_results.append(result)
                         
         # Append new results if any
-        if new_results:
-            new_results_df = pd.concat(new_results)
-            results_df = pd.concat([results_df, new_results_df], ignore_index=True)
-        if new_results:
-            results_df[results_df['dataset_N'] == N].to_csv(csv_path, index=False)
+        if full_results:
+            full_results_df = pd.concat(full_results)
+            full_results_df.to_csv(get_project_root() / f"results/loss_over_time_{N}_batched.csv", index=False)
 
-        if len(results_df) > 0:
-            save_path = get_project_root() / f"results/loss_over_time_{N}_batched.png"
-            plot_losses(results_df[results_df['dataset_N'] == N], save_path)
+        # if len(full_results_df) > 0:
+        #     save_path = get_project_root() / f"results/loss_over_time_{N}_batched.png"
+            # plot_losses(full_results_df, save_path)
 
 if __name__ == "__main__":
     main()
