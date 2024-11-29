@@ -6,6 +6,26 @@ from datasets import Dataset, Features, Value, Sequence
 from transformer_reasoning.utils import get_project_root
 import argparse
 
+RELATIONSHIP_TYPES = [
+    'parent',
+    'child',
+    'best_friend',
+    'worst_enemy',
+    "sibling",
+    "spouse",
+    "cousin",
+    "grandparent",
+    "grandchild",
+    "business_partner",
+    "protege",
+    "mentor",
+    "betrayer",
+    "debtor",
+    "blackmailer",
+    "hero",
+    "evil_twin",
+]
+
 with open(get_project_root() / "generated_data/NameDatabases/NamesDatabases/first names/us.txt", "r") as file:
     FIRST_NAMES = file.read().splitlines()
 MIDDLE_NAMES = FIRST_NAMES
@@ -75,7 +95,7 @@ def create_bipartite_relationships(
             "parent": {"name": "", "index": -1},
             "child": {"name": "", "index": -1},
             "best_friend": {"name": "", "index": -1},
-            "worst_enemy": {"name": "", "index": -1}
+            "worst_enemy": {"name": "", "index": -1},
         }
     
     for parent, child in zip(parents, children):
@@ -102,7 +122,7 @@ def create_uniform_relationships(names: List[str]) -> Dict[str, Dict[str, Dict[s
     name_to_index = {name: i for i, name in enumerate(names)}
 
     for i, name in enumerate(names):
-        for rel_type in ["parent", "child", "best_friend", "worst_enemy"]:
+        for rel_type in RELATIONSHIP_TYPES:
             random_index = random.randint(0, len(names) - 1)
             relationships[name][rel_type] = {"name": names[random_index], "index": name_to_index[names[random_index]]}
 
@@ -118,6 +138,8 @@ def generate_profiles():
     else:
         relationships, name_to_index = create_uniform_relationships(all_names)
 
+
+
     for name in all_names:
         profile = {
             "name": name,
@@ -126,11 +148,8 @@ def generate_profiles():
             "birth_city": random.choice(CITIES),
             "university": random.choice(UNIVERSITIES),
             "employer": random.choice(EMPLOYERS),
-            "parent": relationships[name]["parent"],
-            "child": relationships[name]["child"],
-            "best_friend": relationships[name]["best_friend"],
-            "worst_enemy": relationships[name]["worst_enemy"],
         }
+        profile.update(relationships[name])
         yield profile
 
 # Update the features to include new fields
@@ -157,6 +176,58 @@ chosen_params = Features({
         'name': Value('string'),
         'index': Value('int32')
     },
+    'sibling': {
+        'name': Value('string'),
+        'index': Value('int32')
+    },
+    'spouse': {
+        'name': Value('string'),
+        'index': Value('int32')
+    },
+    'cousin': {
+        'name': Value('string'),
+        'index': Value('int32')
+    },
+    'grandparent': {
+        'name': Value('string'),
+        'index': Value('int32')
+    },
+    'grandchild': {
+        'name': Value('string'),
+        'index': Value('int32')
+    },
+    'business_partner': {
+        'name': Value('string'),
+        'index': Value('int32')
+    },
+    'protege': {
+        'name': Value('string'),
+        'index': Value('int32')
+    },
+    'mentor': {
+        'name': Value('string'),
+        'index': Value('int32')
+    },
+    'betrayer': {
+        'name': Value('string'),
+        'index': Value('int32')
+    },
+    'debtor': {
+        'name': Value('string'),
+        'index': Value('int32')
+    },
+    'blackmailer': {
+        'name': Value('string'),
+        'index': Value('int32')
+    },
+    'hero': {
+        'name': Value('string'),
+        'index': Value('int32')
+    },
+    'evil_twin': {
+        'name': Value('string'),
+        'index': Value('int32')
+    },
     'bio': Value('string')
 })
 
@@ -173,6 +244,6 @@ if __name__ == "__main__":
     N = args.N
     bipartite = args.bipartite
     dataset = Dataset.from_generator(generate_profiles, features=chosen_params)
-    dataset.save_to_disk(str(get_project_root() / f"generated_data/profiles_dataset_{N}_{rel_type}"))
+    dataset.save_to_disk(str(get_project_root() / f"generated_data/profiles_dataset_{N}_{rel_type}_r{len(RELATIONSHIP_TYPES)}"))
     if args.push_to_hub:
-        dataset.push_to_hub(f"EleutherAI/profiles_dataset_{N}_{rel_type}")
+        dataset.push_to_hub(f"EleutherAI/profiles_dataset_{N}_{rel_type}_r{len(RELATIONSHIP_TYPES)}")

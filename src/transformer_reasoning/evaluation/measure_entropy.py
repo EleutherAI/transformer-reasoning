@@ -3,13 +3,14 @@ import math
 from datasets import load_from_disk
 from scipy.special import comb
 from transformer_reasoning.utils import get_project_root, log_double_factorial
+from transformer_reasoning.generate_dataset.generate_profiles import RELATIONSHIP_TYPES
 import argparse
 from datetime import datetime
 import numpy as np
 from math import ceil
 
 
-def calculate_entropy(values, attr, bipartite: bool = False, selection: bool = False, scheme: str = 'optimal', n_profiles: int = None):
+def calculate_entropy(values, attr, bipartite: bool = False, selection: bool = False, scheme: str = 'optimal'):
     # Calculate unique values for each component
     # scheme: 'optimal': use optimal encoding for names/birth_dates,
     #         'enumerate': enumerate all name/birth_date values, neglecting symmetries,
@@ -47,7 +48,7 @@ def calculate_entropy(values, attr, bipartite: bool = False, selection: bool = F
             return birth_date_selection_entropy
     
     if scheme == "independent":
-        if attr in ["name", "parent", "child", "best_friend", "worst_enemy"]:
+        if attr in RELATIONSHIP_TYPES:
             first_names = set(value.split()[0] for value in values)
             middle_names = set(value.split()[1] for value in values)
             last_names = set(value.split()[2] for value in values)

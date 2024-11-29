@@ -1,0 +1,56 @@
+## Training times
+
+Models seem to converge in 1E7 steps, regardless of n_params or n_profiles. Need more data for a more precise estimate.
+
+## Optimal allocation of capacity
+
+Suppose the dataset consists of a fraction $a$ one hop questions and $(1-a)$ two hop questions. Also, there are $n_{\mathrm{rel}}$ times as many two hop questions as one hop questions. It costs the same amount of capacity to reduce the loss by a fixed amount to a single one hop question as it does a single two hop question. Then the loss decrease from learning a one hop question is proportional to $a$, while the loss decrease from learning a two hop question is proportional to $(1-a)/n_{\mathrm{rel}}$. In general, it will be optimal to allocate capacity entirely to one of the question types until it has been learned as thoroughly as possible, then allocate the rest of the capacity to the other question type.
+
+
+## Project explanation
+
+I've been looking into using transformer capacity to investigate transformer's reasoning capabilities.
+
+Transformer capacity measurement is an idea proposed in the paper [Knowledge Capacity Scaling Laws](@https://arxiv.org/abs/2404.05405 ). We train a series of small models of different sizes on datasets which require substantial memorization in order to minimize loss. We train them until convergence, and we find the minimal loss scales with the number of parameters in the model, and we can use this loss scaling to probe the information storage capacity of transformers.
+
+The basic strategy for probing model capacity is to assume a distribution of the data. We can use the entropy of this distribution to derive the number of bits required to encode the entire dataset. We can then subtract the model's loss across the whole dataset from this entropy to find a capacity figure.
+
+Allen-Zhu and Li use fictional "biographies" of individuals with a collection of uniformly random attributes as their dataset, and the corresponding distributions used to measure model capacities are the uniform distributions on the respective attributes. They find that across many sizes of model and dataset, transformers stored roughly 2 bits of information per parameter.
+
+I'm interested in using this idea to probe transformer reasoning capabilities. Specifically, we can use this technique to probe the complexity of the encoding of various data generating processes. Under the assumption that the transformer's capacity is fixed by its number of parameters, if we vary the data size while keeping the data generating process fixed, we can figure out how the transformer's capacity scales with data size (because, by the assumption of fixed capacity, as long as loss > 0, for dataset size N we have $totalloss_N \propto encodingsize_N$). 
+
+We can compare the complexity of the transformer representation with the known optimal complexity (because we control the data generating process). We can also hypothesize about how exactly the transformer is representing things - if a certain representation algorithm scales in the same way that the transformer capacity, then maybe this is the algorithm it's using, though at best we can deduce a "complexity equivalent" algorithm, and not the actual algorithm.
+
+## Experiments with 2 hop reasoning
+
+The first experiment I've pursued is to look at the complexity of "2-hop" reasoning. That is, answering questions like "Who is Bob's mother's father?". Optimally, we can answer questions of this form memorizing (essentially) no more than is required to answer 1-hop questions - we have to memorize everyone's mother and father, but then we can apply this knowledge in two "hops" to find out Bob's mother's father. However, it is difficult to come up with algorithms that can run on a transformer that can answer these questions with significantly less than twice the amount of memorized information. If the transformer looks up the answer to "who is Bob's mother?" in layer 1, and then looks up the answer to "who is X's father?" in layer 2, it must memorize all the relationships twice (in layer 1 and layer 2) in order to answer the question (there is probing based evidence for this replication of information across layers in [Grokked Transformers](https://arxiv.org/pdf/2405.15071)).
+
+As a result, we hypothesize that transformers have an efficiency of around 0.5 on the two hop reasoning task. In fact the models I've trained so far seem to be even less efficient than this. We rougly replicate the 2 bits per parameter capacity for one hop questions. However, for two hop questions, we see a similar capacity only when we assume that encodes the answer to each two hop question individually. That is, instead of learning everyone's mother and everyone's father, it directly memorizes everyone's mother's father. Because the dataset had 4 different relation types in it, this works out to an efficiency of about 0.25.
+
+Three possible explanations for the failure to learn the true 2-hop algorithm:
+1. The models are simply too small. Grokked Transformers found that larger models learned 2-hop reasoning much faster, and their smallest model was 10m parameters vs our largest model at 1.5m parameters.
+2. The models are too shallow; Grokked Transformers used a minimum of 8 layers, while our models were only 4 layers deep.
+3. Insufficient incentive to learn 1 hop reasoning. In our data mix, two hop questions were 10 times more frequent than one hop questions, while there were 4 times as many different two hop questions as one hop questions. Thus memorizing the answer to a two hop question reduces the loss by about 2.5 times more than memorizing the answer to a one hop question, and if the model never learns one hop reasoning then perhaps it will never learn to compose one hop reasoning steps into two hop reasoning.
+
+I am currently running follow up experiments with larger models (up to 10m parameters) and more relation types in the dataset (17 instead of 4). I am also trying a version of the original experiment with one hop questions being only 3 times less frequent than two hop questions, to test the hypothesis that the failure to learn the true 2-hop algorithm is due to insufficient incentive to learn one hop reasoning.
+
+## Learning the name set
+
+The dataset consists of N fictional profiles, each with a set of attributes and relations. The attributes are "employer", "date of birth", "place of birth", "university"; there are about 100 possible values for each and each profile has a uniformly sampled value for each attribute. Learning the possible values of each attribute likely takes some capacity, but it is probably a small quantity that does not scale with N. On the other hand, the values of the relations are uniform over the set of all names, which are unique for each profile. 
+
+Names are generated by sampling from about N1=2000 first names, N2=2000 middle names and N3=1000 last names, for approx. 4 billion possible names. On the other hand, we typically consider N=10000-50000 profiles, a small fraction of the total number of possible names. Additionally, each profile has multiple relations which are all answered by the same set of names. Thus it is more efficient to learn the set of names and encode each relation as a uniform sample from this set - taking log2(N) additional bits per relation per profile - instead of learning only the fixed set of first, middle and last names and using log2(N1)+log2(N2)+log2(N3) additional bits per relation per profile.
+
+The optimal way to encode the choice of names is as a combination; for large N and M:=N1*N2*N3, it takes approximately Nlog2(M) - Nlog2(N) bits to encode the choice of names. A simpler encoding is to use Nlog2(M) bits; this would correspond to simply listing the set of chosen names. I don't have a reliable method to check which encoding the network actually uses, but I do find that the estimated capacity for different N is closer to constant if I suppose the network encodes the names as a list.
+
+This could be more carefully investigated by training models simply to memorize a set of N names (with no attributes) and seeing how the capacity scales with N.
+
+## Capacity gaps and curiosities
+
+The model capacity is slightly lower for two hop reasoning than one hop reasoning, even when we assume that it is using the very inefficient method of memorizing the answer to each question individually. This does not seem to be fully explained by the model learning a small amount of one hop answers; while it does do this, there remains a small gap (see "2.1 hop" capacity on the right hand side of the plots)
+
+We can see two different regimes of operation - one in which the model learns a substantial amount of profile specific information and one where the model appears to learn only the set of names in the data - this is characterised by the merging of "one hop" and "two hop" capacity curves. Interestingly, in the transition between these regimes model capacity seems to drop slightly. I don't presently have any explanation for this. Note that capacity calculations depend on assumptions of how the model is "encoding" information. I would not be surprised if these assumptions were wrong, I just don't have any ideas about how they might be wrong that would explain this pattern.
+
+When they are subject to capacity constraints, the models don't devote their capacity evenly to all of the available question types. We can see, for example, that for the 1.1M parameter model and 15k parameter dataset, it seems to have learned less about 2-hop "parent" questions in exchange for learning more about 2-hop "birth date" and "worst enemy" questions.
+
+## Future work
+

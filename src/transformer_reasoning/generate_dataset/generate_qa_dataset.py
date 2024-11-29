@@ -14,11 +14,28 @@ THIRD_ORDER_TEMPLATE = "What was {name}'s {relation1}'s {relation2}'s {subject}?
 
 # Attributes and relations
 ATTRIBUTES = ['birth_date', 'birth_city', 'university', 'employer']
-RELATIONS = ['parent', 'child', 'best_friend', 'worst_enemy']
-INVERSE_RELATIONS = {'parent': 'child', 'child': 'parent', 'best_friend': 'best_friend', 'worst_enemy': 'worst_enemy'}
+RELATIONS = [
+    'parent', 
+    'child', 
+    'best_friend', 
+    'worst_enemy', 
+    'sibling', 
+    'spouse', 
+    'cousin', 
+    'grandparent', 
+    'grandchild', 
+    'business_partner', 
+    'protege', 
+    'mentor', 
+    'betrayer', 
+    'debtor', 
+    'blackmailer', 
+    'hero', 
+    'evil_twin'
+]
 
 def get_available_relations(profile):
-    return [rel for rel in RELATIONS if profile.get(rel)['name']]
+    return [rel for rel in RELATIONS if profile.get(rel) and profile[rel]['name']]
 
 def generate_question(profile: Dict, profiles: Dataset, order: int, holdout_subjs: List[str], holdout_rels: List[str], subject: str = None) -> Union[Dict, None]:
     name = profile['name']
@@ -26,7 +43,6 @@ def generate_question(profile: Dict, profiles: Dataset, order: int, holdout_subj
     available_subjects = [subj for subj in ATTRIBUTES + available_relations if subj not in holdout_subjs]
     chosen_subject = None
     chosen_relations = {0: None,1: None, 2: None}
-
     if order == 1:
         if not available_subjects:
             return None

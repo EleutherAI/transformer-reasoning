@@ -236,7 +236,7 @@ class LogConstantCheckpointCallback(TrainerCallback):
         return control
 
 class InfiniteQADataset(IterableDataset):
-    def __init__(self, profiles_dataset, tokenizer, max_seq_len=512, orders=[1,2], qa_indices = [], subjects=None):
+    def __init__(self, profiles_dataset, tokenizer, max_seq_len=512, orders=[1,2], qa_indices = [], subjects=None, hop_ratio=0.1):
         self.profiles = profiles_dataset
         self.tokenizer = tokenizer
         self.max_seq_len = max_seq_len
@@ -244,7 +244,7 @@ class InfiniteQADataset(IterableDataset):
         self.orders = orders
         self.templates = load_templates(get_project_root() / "generated_data/templates")
         self.qa_indices = qa_indices
-        self.order_weights = [10**i for i in range(len(orders))]
+        self.order_weights = [1/hop_ratio**i for i in range(len(orders))]
         self.worker_id = None
         self.num_workers = None
         self.answer_sep_tokens = tokenizer('Answer:', add_special_tokens=False)['input_ids']

@@ -4,19 +4,22 @@ import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib.colors import LogNorm
 from pathlib import Path
-from typing import List, Dict, Optional
+from typing import List, Dict, Optional, Union, Tuple
 import seaborn as sns
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from transformer_reasoning.evaluation.eval_utils import (
-    get_checkpoints
+    get_checkpoints,
+    evaluate_model_histograms
 )
 from transformer_reasoning.evaluation.qa_evaluation import evaluate_qa_loss
 from transformer_reasoning.train.train_utils import InfiniteQADataset, evaluate_single_model
-from transformer_reasoning.generate_dataset.generate_qa_dataset import ATTRIBUTES, RELATIONS
+from transformer_reasoning.generate_dataset.generate_qa_dataset import ATTRIBUTES, get_available_relations
 import pandas as pd
 from pandas import DataFrame
 from transformer_reasoning.utils import get_project_root
 from datasets import load_dataset
+import argparse
+import os
 
 def get_checkpoint_paths(model_dir: str, num_checkpoints: int = 20) -> List[Path]:
     """Get evenly spaced checkpoint paths from a directory."""
@@ -35,16 +38,35 @@ def evaluate_checkpoints(
     max_order: int,
     params: int,
     wd: float,
-) -> DataFrame:
+    compute_histograms: bool = False,
+) -> Union[DataFrame, Tuple[DataFrame, Dict[str, List[float]]]]:
     """Evaluate loss for different tasks across checkpoints."""
+    # Load existing results if they exist
+    results_path = f'./results/n{N}_p{params}_omin{min_order}_omax{max_order}_wd{wd}_l4_lr0.001_beta10.99_sf/eval_results_full.csv'
+    existing_results = pd.DataFrame()
+    if Path(results_path).exists():
+        existing_results = pd.read_csv(results_path)
+        last_step = existing_results['global_step'].max() if len(existing_results) > 0 else 0
+    else:
+        last_step = 0
+
     device = "cuda" if torch.cuda.is_available() else "cpu"
     
     checkpoints = get_checkpoints(min_order, max_order, N, params, wd)
-    if not checkpoints:
-        return None
 
-    checkpoint_paths = checkpoints
+    if not checkpoints:
+        return existing_results if not existing_results.empty else None
+
+    # Filter checkpoints to only evaluate new ones
+    checkpoint_dirs = [x for x in checkpoints if os.path.isdir(x)]
+    checkpoint_paths = [
+        cp for cp in checkpoint_dirs 
+        if int(str(cp).split('-')[-1]) >= last_step
+    ]
     
+    if not checkpoint_paths:
+        return existing_results if not existing_results.empty else None
+
     # Set seeds for reproducibility
     torch.manual_seed(42)
     np.random.seed(42)
@@ -53,10 +75,23 @@ def evaluate_checkpoints(
     tokenizer.pad_token = tokenizer.eos_token
     profiles_dataset = load_dataset(f"EleutherAI/profiles_dataset_{N}_uniform")['train']
     
-    subjects = ATTRIBUTES + RELATIONS
+    subjects = ATTRIBUTES + get_available_relations(profiles_dataset[0])
 
+    if compute_histograms:
+        checkpoint_paths = [max(checkpoint_dirs, key=lambda x: int(str(x).split('-')[-1]))]
+    
     all_results = []
-
+    histograms = {
+        'loss': [], 
+        'n_params': [], 
+        'N_profiles': [], 
+        'min_train_hops': [], 
+        'max_train_hops': [], 
+        'wd': [],
+        'subject': [],
+        'hops': []
+    } if compute_histograms else None
+   
     for subject in subjects:
         qa_dataset_1 = InfiniteQADataset(
             profiles_dataset, 
@@ -86,11 +121,33 @@ def evaluate_checkpoints(
                 
                 model = AutoModelForCausalLM.from_pretrained(checkpoint_path).to(device)
                 
-                results_dict_1hop = evaluate_single_model(model, dataloader_1hop, step, 1)
-                results_dict_2hop = evaluate_single_model(model, dataloader_2hop, step, 2)
-                
-                results_dicts.append(results_dict_1hop)
-                results_dicts.append(results_dict_2hop)
+                if compute_histograms:
+                    onehop_and_twohop = evaluate_model_histograms(model, dataloader_1hop, dataloader_2hop)
+                    for hops, losses in enumerate(onehop_and_twohop):
+                        histograms['loss'].extend(losses)
+                        histograms['n_params'].extend([params]*len(losses))
+                        histograms['N_profiles'].extend([N]*len(losses))
+                        histograms['min_train_hops'].extend([min_order]*len(losses))
+                        histograms['max_train_hops'].extend([max_order]*len(losses))
+                        histograms['wd'].extend([wd]*len(losses))
+                        histograms['subject'].extend([subject]*len(losses))
+                        histograms['hops'].extend([hops-1]*len(losses))
+                        avg_result = {
+                            'subject': subject,
+                            'global_step': step,
+                            'loss': np.mean(losses),
+                            'min_train_hops': min_order,
+                            'max_train_hops': max_order,
+                            'hops': hops-1
+                        }
+                        results_dicts.append(avg_result)
+
+                else:
+                    results_dict_1hop = evaluate_single_model(model, dataloader_1hop, step, 1)
+                    results_dict_2hop = evaluate_single_model(model, dataloader_2hop, step, 2)
+                    
+                    results_dicts.append(results_dict_1hop)
+                    results_dicts.append(results_dict_2hop)
                 
                 del model
                 torch.cuda.empty_cache()
@@ -105,7 +162,12 @@ def evaluate_checkpoints(
         
         all_results.append(results)
 
-    return pd.concat(all_results)
+    all_results = pd.concat(all_results)
+    
+    # Combine with existing results if they exist
+    if not existing_results.empty:
+        all_results = pd.concat([existing_results, all_results])
+    return (all_results, pd.DataFrame(histograms)) if compute_histograms else all_results
 
 def plot_losses(all_results: DataFrame, save_path: Optional[str] = None):
     """Plot losses over training steps in a grid of subplots."""
@@ -183,9 +245,15 @@ def plot_losses(all_results: DataFrame, save_path: Optional[str] = None):
     plt.close()
 
 def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--compute_histograms', action='store_true')
+    args = parser.parse_args()
+
     wd = 0.1
     for N in [10000, 15000, 20000, 25000, 30000, 50000]:
-        full_results = []        
+        full_results = []
+        all_histograms = []
+
         for params in [435888, 890320, 1166688, 1475824]:
             for min_order in [1, 2]:
                 for max_order in range(min_order, 3):
@@ -195,16 +263,26 @@ def main():
                         max_order=max_order,
                         params=params,
                         wd=wd,
+                        compute_histograms=args.compute_histograms
                     )
-                    
                     if result is not None:
-                        result.to_csv(f'./results/n{N}_p{params}_omin{min_order}_omax{max_order}_wd{wd}_l4_lr0.001_beta10.99_sf/eval_results_full.csv')
-                        full_results.append(result)
+                        if args.compute_histograms:
+                            df, histograms = result
+                            hist_df = pd.DataFrame(histograms)
+                            hist_df.to_csv(f'./results/n{N}_p{params}_omin{min_order}_omax{max_order}_wd{wd}_l4_lr0.001_beta10.99_sf/eval_results_histograms.csv')
+                            all_histograms.append(hist_df)
+                        else:
+                            result.to_csv(f'./results/n{N}_p{params}_omin{min_order}_omax{max_order}_wd{wd}_l4_lr0.001_beta10.99_sf/eval_results_full.csv')
+                            full_results.append(result)
                         
         # Append new results if any
         if full_results:
             full_results_df = pd.concat(full_results)
             full_results_df.to_csv(get_project_root() / f"results/loss_over_time_{N}_batched.csv", index=False)
+
+        if all_histograms:
+            hist_df = pd.concat(all_histograms)
+            hist_df.to_csv(get_project_root() / f"results/loss_over_time_histograms_{N}_batched.csv", index=False)
 
         # if len(full_results_df) > 0:
         #     save_path = get_project_root() / f"results/loss_over_time_{N}_batched.png"
