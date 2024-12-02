@@ -102,16 +102,16 @@ def train_and_evaluate_probes(
     """Train separate probes for each position and evaluate."""
     # Train 10 separate probes
 
-
-
     probes = []
     train_losses = []
     for pos in tqdm(range(lookback), desc="Training position-specific probes"):
         probe = Classifier(input_dim=input_dim, num_classes=train_labels[pos].shape[-1], device=device)
-        loss = probe.fit(
+        loss = probe.fit_cv(
             train_activations[pos].to(device),
             train_labels[pos].to(device),
-            max_iter=max_iter
+            max_iter=max_iter,
+            k=3,
+            num_penalties=4,
         )
         probes.append(probe)
         train_losses.append(loss)
@@ -172,6 +172,10 @@ def main(args):
     checkpoints.sort(key=lambda x: int(x.split('-')[-1]))
     latest_checkpoint = checkpoints[-1]
 
+    # Get parent directory and checkpoint name
+    checkpoint_parent = os.path.dirname(os.path.dirname(latest_checkpoint))
+    checkpoint_name = os.path.basename(latest_checkpoint)
+    
     model = AutoModelForCausalLM.from_pretrained(latest_checkpoint)
     tokenizer = AutoTokenizer.from_pretrained('EleutherAI/llama_multihop_tokenizer')
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -248,16 +252,20 @@ def main(args):
         }
         results.append(result)
         
-        # Save probes for this layer
+        # Modify save paths to use parent directory and checkpoint name
+        results_dir = os.path.join(checkpoint_parent, f'probe_results_{checkpoint_name}')
+        os.makedirs(results_dir, exist_ok=True)
+        
+        # Save probes for this layer with checkpoint name
         torch.save({
             'probes': [probe.state_dict() for probe in probes],
             'train_losses': train_losses,
             'eval_losses': eval_losses,
             **result
-        }, f'probes_layer_{layer_idx}.pt')
+        }, os.path.join(results_dir, f'probes_layer_{layer_idx}.pt'))
 
-    # Append results to CSV
-    csv_path = 'probe_results.csv'
+    # Save CSV in parent directory with checkpoint name
+    csv_path = os.path.join(checkpoint_parent, f'probe_results_{checkpoint_name}.csv')
     file_exists = os.path.isfile(csv_path)
     
     with open(csv_path, 'a', newline='') as f:

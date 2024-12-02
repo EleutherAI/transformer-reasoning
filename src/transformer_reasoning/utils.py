@@ -176,7 +176,7 @@ class Classifier(torch.nn.Module):
         indices = torch.randperm(num_samples, device=x.device, generator=rng)
 
         # Try a range of L2 penalties, including 0
-        l2_penalties = [0.0] + torch.logspace(-2, 4, num_penalties).tolist()
+        l2_penalties = [0.0] + torch.logspace(-8, -4, num_penalties).tolist()
 
         num_classes = self.linear.out_features
         loss_fn = bce_with_logits if num_classes == 1 else cross_entropy
@@ -204,6 +204,8 @@ class Classifier(torch.nn.Module):
 
         mean_losses = losses.mean(dim=0)
         best_idx = mean_losses.argmin()
+
+        print(f"Best penalty: {l2_penalties[best_idx]}, best loss: {mean_losses[best_idx]}")
 
         # Refit with the best penalty
         best_penalty = l2_penalties[best_idx]

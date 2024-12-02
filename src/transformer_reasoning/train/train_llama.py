@@ -65,7 +65,7 @@ def main(args):
     hop_str = f"_hr{args.hop_ratio}" if args.hop_ratio != 0.1 else ""
     output_dir = f"./results/n{args.N}_p{real_num_params}_omin{min(args.orders)}_omax{max(args.orders)}_wd{args.wd}_l{args.num_layers}_lr{args.lr}_beta1{args.beta1}_{sf_str}{rel_str}{hop_str}"
 
-    if args.resume_from:
+    if args.resume_from_checkpoint:
         checkpoints = glob.glob(os.path.join(output_dir, "checkpoint-*"))
         latest_checkpoint = sorted(checkpoints, key=lambda x: int(x.split("-")[-1]))[-1]
         print(f"Loading model from checkpoint: {latest_checkpoint}")
@@ -92,7 +92,6 @@ if __name__ == "__main__":
     parser.add_argument("--subset_size", type=int, default=None, help="Number of examples to use for training (for testing purposes)")
     parser.add_argument("--N", type=int, default=25000, help="Number of profiles to use for QA dataset")
     parser.add_argument("--orders", type=int, nargs="+", default=None, help="Orders to use for QA dataset")
-    parser.add_argument("--resume_from", type=str, default=None, help="Resume training from given checkpoint")
     parser.add_argument("--qa_ratio", type=float, default=0.5,
                        help="Ratio of QA examples to bios examples")
     parser.add_argument("--hop_ratio", type=float, default=0.1, help="Ratio of one-hop to two-hop QA examples")

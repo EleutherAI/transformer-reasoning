@@ -142,7 +142,10 @@ def train_single_model(
                     torch.save(optimizer_state, f"{model_path}/optimizer.pt")
                 
                     results_df = pd.DataFrame(results_dicts)
-                    results_df.to_csv(f"{output_dir}/eval_results.csv", index=False)
+                    if os.path.exists(f"{output_dir}/eval_results.csv"):
+                        results_df.to_csv(f"{output_dir}/eval_results.csv", mode='a', header=False, index=False)
+                    else:
+                        results_df.to_csv(f"{output_dir}/eval_results.csv", index=False)
                 
                 # Back to training mode
                 model.train()
