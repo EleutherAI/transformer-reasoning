@@ -51,7 +51,7 @@ def collect_qa_activations(model, dataloader, layer_idx, tokenizer, num_samples=
                 if len(answer_positions) == 0:
                     continue
 
-                # Create window of input positions (ans_pos-10 to ans_pos-1)
+                # Create window of input positions (ans_pos-lookback to ans_pos-1)
                 for ans_pos in answer_positions:
                     input_positions = torch.arange(ans_pos-lookback, ans_pos)
                     

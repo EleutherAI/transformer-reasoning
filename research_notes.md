@@ -77,5 +77,25 @@ When they are subject to capacity constraints, the models don't devote their cap
 
 ## Hypotheses
 
+### Transformers at best require about twice the capacity to learn 2-hop reasoning as the optimal algorithm
 
-### Hypothesis 1: Transformers can't learn the true 2-hop reasoning algorithm
+I have come up with very slightly more efficient algorithms than "lookup the answer to the first hop, then lookup the answer to the second hop", but the advantage is very small. E.g. at each layer we lookup 1 bit of the first hop answer, and every layer past the first we look up 1 bit of the second hop answer given all the remaining first hop possibilities. This potentially saves some capacity because one layer can look up the second bit of the first hop and the first bit of the second hop. I don't think it saves much capacity in the end, though I need to write up a more careful analysis.
+
+Testing this hypothesis is somewhat difficult because I've found that transformers seem to be completely unable to learn 2-hop reasoning if their capacity is less than 3x the 1hop requirement. Maybe we need to train a model to do 2-hop reasoning and then fill up its excess capacity with additional data.
+
+### Transformers can learn optimal 2-hop reasoning using chain of thought
+
+Self explanatory.
+
+Can transformers that only learn incomplete 1-hop reasoning learn 2-hop CoT?
+
+### Capacity scaling can be used to predict generalization
+
+If we can correctly predict the capacity required to learn increasingly large subsets Di ⊂ D{i+1} of D', then we will see perfect generalization from some subset Di to D' iff we predict that for j≥i the capacity required to learn Dj with no loss = capacity required to learn Di with no loss. That is, if capacity scaling is predictable then we can use it to predict generalization
+
+Specifically for 2 hop reasoning:
+ - Two hop reasoning will not generalize in regimes where capacity scales according to the "big hash" scheme
+ - Two hop reasoning can generalize to novel first & second hop combinations if it scales as 2x the "optimal" capacity, but cannot generalize to novel second hop questions
+ - Two hop reasoning will generalize to questions where the first hop has only been seen in one-hop questions only if we observe that capacity requirements do not increase more first hops are added to the two hop question set (that were already present in the one hop question set)
+   - It's possible that adding additional first hops to the two hop question set incurs a very small capacity cost, which prevents generalization nonetheless, but this cost should still scale with # of first hops added
+ - Transformers with CoT can learn 2-hop reasoning with novel first or second hops (that have been seen in one hop questions only), iff two-hop + CoT scales optimally
