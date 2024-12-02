@@ -7,37 +7,17 @@ from transformers import (
     DataCollatorForLanguageModeling,
 )
 from datasets import load_dataset
-from transformer_reasoning.train.train_utils import calculate_model_size, create_model_and_tokenizer
+from transformer_reasoning.train.train_utils import calculate_model_size, create_model_and_tokenizer, chunk_and_tokenize
 
 import glob
 import os
 
 
-def load_and_prepare_datasets(tokenizer):
-    tinystories_dataset = load_dataset("roneneldan/TinyStories")
-    
-    def tokenize(examples):
-        return tokenizer(
-            examples["text"],
-            truncation=True,
-            max_length=512,
-            padding="max_length",
-            return_tensors="pt"
-        )
+def load_and_prepare_datasets():
+    tinystories_dataset = load_dataset("EleutherAI/tinystories-pretokenized-pythia")
 
     train_dataset = tinystories_dataset["train"]
     val_dataset = tinystories_dataset["validation"]
-
-    train_dataset = train_dataset.map(
-        tokenize,
-        batched=True,
-        remove_columns=train_dataset.column_names
-    )
-    val_dataset = val_dataset.map(
-        tokenize, 
-        batched=True,
-        remove_columns=val_dataset.column_names
-    )
 
     return train_dataset, val_dataset
 
@@ -53,22 +33,20 @@ def main(args):
         tokenizer = AutoTokenizer.from_pretrained(args.resume_from)
     else:
         model, tokenizer = create_model_and_tokenizer(args.num_params)
-    train_dataset, val_dataset = load_and_prepare_datasets(
-        tokenizer
-    )
+    train_dataset, val_dataset = load_and_prepare_datasets()
 
     if args.resume_from:
         base_checkpoint_dir = f"./results/tinystories_{args.num_params}"
         latest_checkpoint = max(glob.glob(os.path.join(base_checkpoint_dir, "checkpoint-*")), key=os.path.getctime)
 
-    epochs = 3
+    epochs = 9
     print(f"Epochs: {epochs}")
     # Set up training arguments
     training_args = TrainingArguments(
         output_dir=f"./results/tinystories_{args.num_params}",
         num_train_epochs=epochs,
-        per_device_train_batch_size=32,
-        per_device_eval_batch_size=16,
+        per_device_train_batch_size=64,
+        per_device_eval_batch_size=64,
         eval_accumulation_steps=1,
         warmup_steps=500,
         weight_decay=0.1,

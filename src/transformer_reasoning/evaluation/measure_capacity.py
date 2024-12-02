@@ -1,142 +1,276 @@
-import torch
-from datasets import load_from_disk
-from transformers import AutoTokenizer, AutoModelForCausalLM
-import re
-from typing import Dict, List, Tuple
-import random
-from transformer_reasoning.utils import get_project_root
 import argparse
-import os
+from collections import defaultdict
+import itertools
 
-def load_templates(template_dir) -> Dict[str, List[str]]:
-    """Load all template files and return a dictionary of templates."""
-    templates = {}
-    for filename in os.listdir(template_dir):
-        if filename.endswith("-templates.txt"):
-            attribute = filename.split("-")[0]
-            with open(os.path.join(template_dir, filename), 'r') as f:
-                templates[attribute] = f.read().splitlines()
-    return templates
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
 
-def find_template_matches(bio: str, templates: Dict[str, List[str]]) -> List[Tuple[str, str, int, int]]:
-    """
-    Find all template matches in the bio and return their variable positions.
-    Returns: List of (attribute, value, start_idx, end_idx) tuples
-    """
-    matches = []
+from datasets import load_dataset
+
+from transformer_reasoning.utils import get_project_root
+from transformer_reasoning.evaluation.measure_entropy import calculate_entropy
+from transformer_reasoning.evaluation.eval_utils import load_eval_results
+from transformer_reasoning.evaluation.plot_functions import cap_vs_N_plot
+from transformer_reasoning.generate_dataset.generate_profiles import RELATIONSHIP_TYPES
+
+import seaborn as sns
+
+def calculate_capacities_average(total_losses, entropies, name_selection_entropy, birth_date_selection_entropy, N, hops, scheme, incremental=False):
+    """Calculate average capacities for all attributes."""
+    num_relations = len([r for r in RELATIONSHIP_TYPES if r in entropies])
+    qa_multiplier = 1
+
+    if incremental:
+        name_selection_entropy = 0
+        birth_date_selection_entropy = 0
+
+    if scheme == "2-hop-big-hash" and hops == 2:
+        qa_multiplier = num_relations
+
+    total_entropy = sum(entropies.values())
+    avg_loss = total_losses['all_questions'] 
     
-    for attribute, attribute_templates in templates.items():
-        for template in attribute_templates:
-            # Convert template to regex pattern
-            pattern = re.escape(template).replace(f'\\{{{attribute}\\}}', '(.*?)')
-            match = re.search(pattern, bio)
-            if match:
-                value = match.group(1)
-                # Find the position of the variable in the original text
-                template_parts = template.split(f'{{{attribute}}}')
-                start_idx = bio.find(template_parts[0]) + len(template_parts[0])
-                end_idx = start_idx + len(value)
-                matches.append((attribute, value, start_idx, end_idx))
-                break  # Move to next attribute once we find a match
-                
-    return matches
+    if total_entropy > avg_loss * len(entropies):
+        capacity = (total_entropy - avg_loss * len(entropies)) * qa_multiplier * N + name_selection_entropy + birth_date_selection_entropy
+    elif not incremental:
+        excess_loss = avg_loss * len(entropies) - total_entropy
+        capacity = name_selection_entropy + birth_date_selection_entropy - excess_loss * N
+    else:
+        capacity = 0
 
-def get_token_ranges(text: str, tokenizer, matches: List[Tuple[str, str, int, int]]) -> List[Tuple[str, List[int]]]:
-    """
-    Convert character ranges to token ranges.
-    Returns: List of (attribute, token_indices) tuples
-    """
-    # Tokenize the full text
-    tokens = tokenizer.encode(text, add_special_tokens=True)
-    token_ranges = []
-    
-    for attribute, value, start_idx, end_idx in matches:
-        # Tokenize the text up to the start of the variable
-        prefix_tokens = tokenizer.encode(text[:start_idx], add_special_tokens=True)
-        # Tokenize the text up to the end of the variable
-        full_tokens = tokenizer.encode(text[:end_idx], add_special_tokens=True)
+    return {'total_capacity': capacity}
+
+def calculate_capacities_per_attr(per_attribute_losses, entropies, name_selection_entropy, birth_date_selection_entropy, N, hops, scheme, incremental=False):
+    """Calculate per-attribute and 2nd order QA capacities."""
+    # Collect attribute values for entropy calculation    
+    num_relations = len([r for r in RELATIONSHIP_TYPES if r in entropies])
+    qa_multiplier = 1
+    qa_capacity = {}
+
+    if incremental:
+        name_selection_entropy = 0
+        birth_date_selection_entropy = 0
+
+    if scheme == "2-hop-big-hash" and hops == 2:
+        qa_multiplier = num_relations
+
+    for attr, entropy in entropies.items():
+        label = f"{attr}_capacity"
+        qa_loss = per_attribute_losses[attr]
+        if attr in RELATIONSHIP_TYPES:
+            if entropy > qa_loss:
+                qa_capacity[label] = (entropy - qa_loss) * qa_multiplier * N + name_selection_entropy/num_relations
+            elif not incremental:
+                excess_loss = qa_loss - entropy
+                qa_capacity[label] = (name_selection_entropy - excess_loss * N)/num_relations
+            else:
+                qa_capacity[label] = 0
+        elif attr == 'birth_date':
+            if entropy > qa_loss:
+                qa_capacity[label] = (entropy - qa_loss) * qa_multiplier * N + birth_date_selection_entropy
+            elif not incremental:
+                excess_loss = qa_loss - entropy
+                qa_capacity[label] = birth_date_selection_entropy - excess_loss * N
+            else:
+                qa_capacity[label] = 0
+        else:
+            qa_capacity[label] = (entropy - qa_loss) * qa_multiplier * N
+
+    qa_capacity['total_capacity'] = sum(qa_capacity.values())
+
+    return qa_capacity
+
+def calculate_capacities(losses, entropies, name_selection_entropy, birth_date_selection_entropy, N, hops, scheme, incremental=False):
+    if set(entropies.keys()).issubset(set(losses.keys())):
+        return calculate_capacities_per_attr(losses, entropies, name_selection_entropy, birth_date_selection_entropy, N, hops, scheme, incremental)
+    else:
+        return calculate_capacities_average(losses, entropies, name_selection_entropy, birth_date_selection_entropy, N, hops, scheme)
+
+
+def process_timestep_data(eval_results, N, entropies, name_selection_entropy, birth_date_selection_entropy, scheme):
+    """Calculate capacities for each timestep in the loss data."""
+    results = []
+    filtered_eval_results = eval_results[eval_results['N_profiles'] == N]
+    # Group by model configuration
+    for (num_parameters, min_order, max_order, wd, eval_hops, global_step), group in filtered_eval_results.groupby(
+        ['n_params', 'min_train_hops', 'max_train_hops', 'weight_decay', 'hops', 'global_step']
+    ):
+        total_losses = {}
+        for _, row in group.iterrows():
+            subject = row['subject']
+            total_losses[subject] = row['loss'] / np.log(2)
+
+        total_losses['all_questions'] = group['loss'].mean() / np.log(2)
+        # Calculate capacities
+        capacities = calculate_capacities(
+            total_losses, 
+            entropies, 
+            name_selection_entropy, 
+            birth_date_selection_entropy, 
+            N,
+            eval_hops,
+            scheme
+        )
+
+        dummy_losses = {subject: 0 for subject in total_losses}
+        dummy_losses['all_questions'] = 0
+
+        dataset_entropy = calculate_capacities(
+            dummy_losses, 
+            entropies, 
+            name_selection_entropy, 
+            birth_date_selection_entropy, 
+            N,
+            eval_hops,
+            scheme
+        )
         
-        # The variable tokens are between these lengths
-        var_token_indices = list(range(len(prefix_tokens)-1, len(full_tokens)-1))
-        token_ranges.append((attribute, var_token_indices))
-    
-    return token_ranges
+        result = {
+            'n_params': num_parameters,
+            'N_profiles': N,
+            'min_train_hops': min_order,
+            'max_train_hops': max_order,
+            'hops': eval_hops,
+            'weight_decay': wd,
+            'global_step': global_step,
+            'parameter_norm': row['parameter_l2'],
+            'capacity': capacities['total_capacity'],
+            'baseline_capacity': name_selection_entropy + birth_date_selection_entropy,
+            'dataset_entropy': dataset_entropy['total_capacity']
+        }
 
-def calculate_losses(model, tokenizer, text: str, token_ranges: List[Tuple[str, List[int]]]) -> Dict[str, Tuple[float, float]]:
-    """
-    Calculate losses for each variable's tokens.
-    Returns: Dict mapping attributes to (first_token_loss, all_tokens_loss)
-    """
-    inputs = tokenizer(text, return_tensors="pt").to(model.device)
-    with torch.no_grad():
-        outputs = model(**inputs, labels=inputs["input_ids"])
-        # Get per-token losses (batch_size=1 so we take [0])
-        token_losses = outputs.loss * inputs["input_ids"].shape[1]  # Multiply by seq length to get sum instead of mean
-        token_losses = token_losses.cpu()
-    
-    attribute_losses = {}
-    for attribute, token_indices in token_ranges:
-        if token_indices:  # Check if we found any tokens
-            first_token_loss = float(token_losses[token_indices[0]])
-            all_tokens_loss = float(sum(token_losses[i] for i in token_indices))
-            attribute_losses[attribute] = (first_token_loss, all_tokens_loss)
-    
-    return attribute_losses
+        result.update(capacities)
+
+        results.append(result)
+
+        if eval_hops == 2:
+            one_hop_losses = filtered_eval_results.loc[
+                (filtered_eval_results['hops'] == 1) & 
+                (filtered_eval_results['n_params'] == num_parameters) &
+                (filtered_eval_results['min_train_hops'] == min_order) &
+                (filtered_eval_results['max_train_hops'] == max_order) &
+                (filtered_eval_results['weight_decay'] == wd) &
+                (filtered_eval_results['global_step'] == global_step)
+            ].iloc[0]
+            one_hop_losses['all_questions'] = one_hop_losses['loss'].mean() / np.log(2)
+
+            incr_capacities = calculate_capacities(
+                one_hop_losses, 
+                entropies, 
+                name_selection_entropy, 
+                birth_date_selection_entropy, 
+                N, 
+                1, 
+                scheme, 
+                incremental=True
+            )
+            incr_entropies = calculate_capacities(
+                dummy_losses, 
+                entropies, 
+                name_selection_entropy, 
+                birth_date_selection_entropy, 
+                N,
+                1,
+                scheme,
+                incremental=True
+            )
+
+            result = result.copy()
+            result['hops'] = 2.1
+            result['capacity'] = incr_capacities['total_capacity'] + capacities['total_capacity']
+            result['baseline_capacity'] = name_selection_entropy + birth_date_selection_entropy
+            result['dataset_entropy'] = incr_entropies['total_capacity']
+            capacities = {attr: incr_capacities[attr] + capacities[attr] for attr in capacities}
+            result.update(capacities)
+            results.append(result)
+
+    return pd.DataFrame(results)
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--order", type=int, required=True)
-    parser.add_argument("--checkpoint", type=int, required=True)
-    parser.add_argument("--N", type=int, required=True)
-    parser.add_argument("--sample-size", type=int, default=1000)
-    parser.add_argument("--num-parameters", type=int, default=1_000_000)
+    parser.add_argument("--checkpoint", type=str, default="latest")
+    parser.add_argument("--scheme", type=str, choices=["optimal", "2-hop-big-hash"], default="optimal")
+    parser.add_argument("--selection_scheme", type=str, choices=["optimal", "enumerate", "independent"], default="optimal")
+    parser.add_argument("--relations", type=int, default=None)
     args = parser.parse_args()
 
-    # Load model and tokenizer
-    model_path = get_project_root() / f"results/n{args.N}_p{args.num_parameters}_o{args.order}_continued_2/checkpoint-{args.checkpoint}"
-    model = AutoModelForCausalLM.from_pretrained(model_path).cuda()
-    tokenizer = AutoTokenizer.from_pretrained("meta-llama/Meta-Llama-3-8B")
+    eval_results = load_eval_results()
+    rel_str = f"_r{args.relations}" if args.relations else ""
 
-    # Load datasets
-    bios_dataset = load_from_disk(str(get_project_root() / f"generated_data/bios/bios_dataset_{args.N}"))
-    templates = load_templates(get_project_root() / "generated_data/templates")
+    if args.relations is not None:
+        eval_results = eval_results[eval_results['relations'] == args.relations]
+    else:
+        eval_results = eval_results[eval_results['relations'].isna()]
 
-    # Sample random subset
-    sample_indices = random.sample(range(len(bios_dataset)), args.sample_size)
-    sample_bios = bios_dataset.select(sample_indices)
+    N_sizes = list(set(eval_results['N_profiles']))
 
-    # Initialize aggregated losses
-    total_losses = {}  # attribute -> (sum_first_token_loss, sum_all_tokens_loss, count)
-
-    # Process each bio
-    for bio in sample_bios["bio"]:
-        # Find variable positions
-        matches = find_template_matches(bio, templates)
-        if not matches:
-            continue
-
-        # Get token ranges for variables
-        token_ranges = get_token_ranges(bio, tokenizer, matches)
+    all_timestep_results = []
+    final_results = []
+    for N in N_sizes:
         
-        # Calculate losses
-        losses = calculate_losses(model, tokenizer, bio, token_ranges)
-        
-        # Aggregate losses
-        for attr, (first_loss, all_loss) in losses.items():
-            if attr not in total_losses:
-                total_losses[attr] = [0.0, 0.0, 0]
-            total_losses[attr][0] += first_loss
-            total_losses[attr][1] += all_loss
-            total_losses[attr][2] += 1
+        # Load and process dataset
+        profiles_dataset = load_dataset(f"EleutherAI/profiles_dataset_{N}_uniform{rel_str}")['train']
 
-    # Print results
-    print("\nAverage losses per attribute:")
-    print(f"{'Attribute':<15} {'First Token':<12} {'All Tokens':<12} {'Count':<8}")
-    print("-" * 47)
-    for attr, (first_sum, all_sum, count) in total_losses.items():
-        if count > 0:
-            print(f"{attr:<15} {first_sum/count:<12.4f} {all_sum/count:<12.4f} {count:<8}")
+        relations = [r for r in RELATIONSHIP_TYPES if r in profiles_dataset.features]
+
+        attribute_values = {
+            'name': list(set(profiles_dataset['name'])),
+            'birth_date': list(set(profiles_dataset['birth_date'])),
+            'birth_city': list(set(profiles_dataset['birth_city'])),
+            'university': list(set(profiles_dataset['university'])),
+            'employer': list(set(profiles_dataset['employer'])),
+            **{r: list(set(profile['name'] for profile in profiles_dataset[r])) for r in relations}
+        }
+
+        # Calculate entropies
+        entropies = {attr: calculate_entropy(values, attr, scheme=args.scheme) 
+                    for attr, values in attribute_values.items() 
+                    if attr != 'name'}
+        name_selection_entropy = calculate_entropy(attribute_values['name'], 'name', selection=True, scheme=args.selection_scheme)
+        birth_date_selection_entropy = calculate_entropy(attribute_values['birth_date'], 'birth_date', selection=True, scheme=args.selection_scheme)
+
+        # Process all timesteps
+        timestep_results = process_timestep_data(
+            eval_results, 
+            N, 
+            entropies, 
+            name_selection_entropy, 
+            birth_date_selection_entropy,
+            args.scheme
+        )
+        all_timestep_results.append(timestep_results)
+        # Get final timestep results for each configuration
+        final_timesteps = timestep_results.groupby(
+            ['n_params', 'min_train_hops', 'max_train_hops', 'weight_decay', 'hops']
+        ).last().reset_index()
+        final_results.append(final_timesteps)
+
+
+    # Combine results
+    all_timestep_df = pd.concat(all_timestep_results, ignore_index=True)
+    final_df = pd.concat(final_results, ignore_index=True)
+    final_df = final_df[final_df['global_step'] >= 700000]
+
+    # Save all timestep results
+    all_timestep_df.to_csv(get_project_root() / f'results/capacity_results_all_timesteps_{args.scheme}_{args.selection_scheme}{rel_str}.csv', index=False)
+    final_df.to_csv(get_project_root() / f'results/capacity_results_{args.scheme}_{args.selection_scheme}{rel_str}.csv', index=False)
+
+    # Adjust step counts if max steps > 5M
+    def adjust_steps(row):
+        group_key = (row['n_params'], row['min_train_hops'], row['max_train_hops'], row['weight_decay'])
+        steps = row['global_step']
+        return steps / N
+        
+    all_timestep_df['normalized_step'] = all_timestep_df.apply(adjust_steps, axis=1)
+
+    # Generate plots
+    # normalized_capacity_plot(final_df, args.scheme)
+    # cap_vs_params_plot(all_timestep_df, N_sizes, scheme=args.scheme)
+    cap_vs_N_plot(all_timestep_df, scheme=args.scheme, selection_scheme=args.selection_scheme, rel_str=rel_str)
+    
+    # Plot capacity vs norm using all timesteps
+    # cap_vs_norm_plot(all_timestep_df, scheme=args.scheme)
 
 if __name__ == "__main__":
     main()
-

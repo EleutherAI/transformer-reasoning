@@ -8,10 +8,19 @@ logs/
 results/
 wandb/
 openrouter_api_key.txt
-generated_data/
+generated_data/profiles*
+generated_data/bios
+generated_data/qa*
 
 *.egg-info/
 final_model*
 .vscode/
 .pytest_cache/
 *.csv
+*.pt
+*.json
+*.jsonl
+*.pkl
+*.pickle
+*.npy
+*.safetensors

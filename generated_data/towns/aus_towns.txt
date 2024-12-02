@@ -1,0 +1,223 @@
+Canberra, Australian Capital Territory
+Albury-Wodonga, New South Wales
+Armidale, New South Wales
+Ballina, New South Wales
+Balranald, New South Wales
+Batemans Bay, New South Wales
+Bathurst, New South Wales
+Bega, New South Wales
+Bourke, New South Wales
+Bowral, New South Wales
+Broken Hill, New South Wales
+Byron Bay, New South Wales
+Camden, New South Wales
+Campbelltown, New South Wales
+Cobar, New South Wales
+Coffs Harbour, New South Wales
+Cooma, New South Wales
+Coonabarabran, New South Wales
+Coonamble, New South Wales
+Cootamundra, New South Wales
+Corowa, New South Wales
+Cowra, New South Wales
+Deniliquin, New South Wales
+Dubbo, New South Wales
+Forbes, New South Wales
+Forster, New South Wales
+Glen Innes, New South Wales
+Gosford, New South Wales
+Goulburn, New South Wales
+Grafton, New South Wales
+Griffith, New South Wales
+Gundagai, New South Wales
+Gunnedah, New South Wales
+Hay, New South Wales
+Inverell, New South Wales
+Junee, New South Wales
+Katoomba, New South Wales
+Kempsey, New South Wales
+Kiama, New South Wales
+Kurri Kurri, New South Wales
+Lake Cargelligo, New South Wales
+Lismore, New South Wales
+Lithgow, New South Wales
+Maitland, New South Wales
+Moree, New South Wales
+Moruya, New South Wales
+Murwillumbah, New South Wales
+Muswellbrook, New South Wales
+Nambucca Heads, New South Wales
+Narrabri, New South Wales
+Narrandera, New South Wales
+Newcastle, New South Wales
+Nowra-Bomaderry, New South Wales
+Orange, New South Wales
+Parkes, New South Wales
+Parramatta, New South Wales
+Penrith, New South Wales
+Port Macquarie, New South Wales
+Queanbeyan, New South Wales
+Raymond Terrace, New South Wales
+Richmond, New South Wales
+Scone, New South Wales
+Singleton, New South Wales
+Sydney, New South Wales
+Tamworth, New South Wales
+Taree, New South Wales
+Temora, New South Wales
+Tenterfield, New South Wales
+Tumut, New South Wales
+Ulladulla, New South Wales
+Wagga Wagga, New South Wales
+Wauchope, New South Wales
+Wellington, New South Wales
+West Wyalong, New South Wales
+Windsor, New South Wales
+Wollongong, New South Wales
+Wyong, New South Wales
+Yass, New South Wales
+Young, New South Wales
+Alice Springs, Northern Territory
+Anthony Lagoon, Northern Territory
+Darwin, Northern Territory
+Katherine, Northern Territory
+Tennant Creek, Northern Territory
+Ayr, Queensland
+Beaudesert, Queensland
+Blackwater, Queensland
+Bowen, Queensland
+Brisbane, Queensland
+Buderim, Queensland
+Bundaberg, Queensland
+Caboolture, Queensland
+Cairns, Queensland
+Charleville, Queensland
+Charters Towers, Queensland
+Cooktown, Queensland
+Dalby, Queensland
+Deception Bay, Queensland
+Emerald, Queensland
+Gatton, Queensland
+Gladstone, Queensland
+Gold Coast, Queensland
+Goondiwindi, Queensland
+Gympie, Queensland
+Hervey Bay, Queensland
+Ingham, Queensland
+Innisfail, Queensland
+Kingaroy, Queensland
+Mackay, Queensland
+Mareeba, Queensland
+Maroochydore, Queensland
+Maryborough, Queensland
+Moonie, Queensland
+Moranbah, Queensland
+Mount Isa, Queensland
+Mount Morgan, Queensland
+Moura, Queensland
+Redcliffe, Queensland
+Rockhampton, Queensland
+Roma, Queensland
+Stanthorpe, Queensland
+Toowoomba, Queensland
+Townsville, Queensland
+Warwick, Queensland
+Weipa, Queensland
+Winton, Queensland
+Yeppoon, Queensland
+Adelaide, South Australia
+Ceduna, South Australia
+Clare, South Australia
+Coober Pedy, South Australia
+Gawler, South Australia
+Goolwa, South Australia
+Iron Knob, South Australia
+Leigh Creek, South Australia
+Loxton, South Australia
+Millicent, South Australia
+Mount Gambier, South Australia
+Murray Bridge, South Australia
+Naracoorte, South Australia
+Oodnadatta, South Australia
+Port Adelaide Enfield, South Australia
+Port Augusta, South Australia
+Port Lincoln, South Australia
+Port Pirie, South Australia
+Renmark, South Australia
+Victor Harbor, South Australia
+Whyalla, South Australia
+Beaconsfield, Tasmania
+Bell Bay, Tasmania
+Burnie, Tasmania
+Devonport, Tasmania
+Hobart, Tasmania
+Kingston, Tasmania
+Launceston, Tasmania
+New Norfolk, Tasmania
+Queenstown, Tasmania
+Richmond, Tasmania
+Rosebery, Tasmania
+Smithton, Tasmania
+Stanley, Tasmania
+Ulverstone, Tasmania
+Wynyard, Tasmania
+Albury-Wodonga, Victoria
+Ararat, Victoria
+Bacchus Marsh, Victoria
+Bairnsdale, Victoria
+Ballarat, Victoria
+Beechworth, Victoria
+Benalla, Victoria
+Bendigo, Victoria
+Castlemaine, Victoria
+Colac, Victoria
+Echuca, Victoria
+Geelong, Victoria
+Hamilton, Victoria
+Healesville, Victoria
+Horsham, Victoria
+Kerang, Victoria
+Kyabram, Victoria
+Kyneton, Victoria
+Lakes Entrance, Victoria
+Maryborough, Victoria
+Melbourne, Victoria
+Mildura, Victoria
+Moe, Victoria
+Morwell, Victoria
+Port Fairy, Victoria
+Portland, Victoria
+Sale, Victoria
+Sea Lake, Victoria
+Seymour, Victoria
+Shepparton, Victoria
+Sunbury, Victoria
+Swan Hill, Victoria
+Traralgon, Victoria
+Yarrawonga, Victoria
+Wangaratta, Victoria
+Warragul, Victoria
+Werribee, Victoria
+Wonthaggi, Victoria
+Broome, Western Australia
+Bunbury, Western Australia
+Busselton, Western Australia
+Coolgardie, Western Australia
+Dampier, Western Australia
+Derby, Western Australia
+Fremantle, Western Australia
+Geraldton, Western Australia
+Kalgoorlie, Western Australia
+Kambalda, Western Australia
+Katanning, Western Australia
+Kwinana, Western Australia
+Mandurah, Western Australia
+Meekatharra, Western Australia
+Mount Barker, Western Australia
+Narrogin, Western Australia
+Newman, Western Australia
+Northam, Western Australia
+Perth, Western Australia
+Port Hedland, Western Australia
+Tom Price, Western Australia
+Wyndham, Western Australia

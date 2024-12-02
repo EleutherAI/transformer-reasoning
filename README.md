@@ -1,108 +1,79 @@
-## Transformer Reasoning
+# Transformer Reasoning and Capacity
 
-Forked from the repository for *Grokked Transformers are Implicit Reasoners: A Mechanistic Journey to the Edge of Generalization* (https://arxiv.org/abs/2405.15071)
+Forked from the repository for *Grokked Transformers are Implicit Reasoners: A Mechanistic Journey to the Edge of Generalization* (https://arxiv.org/abs/2405.15071), but there is almost no overlap.
 
-### File Structure
-```
-GrokkedTranformer/
-├─  {composition/comparison/complex_reasoning}.ipynb: scripts for training/evaluation data generation
-├─  data/: cached training/evaluation data
-├─  main.py: main script for model training
-├─  eval_qa.py: evaluation script for trained model
-├─  causal_tracing_{composition/comparison}.py: causal tracing & logit lens
-├─  LLM/: cached testing data & model outputs for LLMs based on non-parametric memory
-    ├─ {prompt/retrieval}_{directna/cot}_*.txt: input for the setting {without/with} retrieval augmentation and {without/with} CoT
-    ├─ answer_*.txt: ground truth answer
-    ├─ {gemini/gpt4turbo}_*.txt: predictions of Gemini-Pro-1.5 and GPT-4-Turbo
-├─  LLM.ipynb: evaluation script and cached evaluation results for LLMs
-└── utils.py: other helper functions
-```
+Using capcity mreasures to understand transformer reasoning. Transformers may have a memorization capacity of about 2 bits per parameter. We can test how well transformers of a fixed size can learn different datasets to understand how efficiently they are compressing the data, and this can give us some insights into the algorithms they use and their reasoning ability.
 
-### Environmental Setup
+## Setup
+
+Navigate to the root directory and install the dependencies:
+
 ```bash
-pip install torch==1.13.1+cu116 torchvision==0.14.1+cu116 torchaudio==0.13.1 --extra-index-url https://download.pytorch.org/whl/cu116
-
-cd transformers
 pip install -e .
-cd ..
-
-cd simpletransformers
-pip install -e .
-cd ..
 ```
 
-### Data Preparation
-- Download from [link](https://buckeyemailosu-my.sharepoint.com/:f:/g/personal/wang_13930_buckeyemail_osu_edu/EghpRAb3V71FnQsi44nuAfsB47HZSmmWuxt5DML2hqtM7w?e=TWeYkW) and unzip into data/, or alternatively, run ```{composition/comparison/complex_reasoning}.ipynb``` to generate the data
-- Download from [link](https://buckeyemailosu-my.sharepoint.com/:f:/g/personal/wang_13930_buckeyemail_osu_edu/EiTbt6SLSLhLrJd_kgJJBtIBPerEzHziFVsmn98pP8sSZQ?e=KUaI0d) and unzip into LLM/
+(this probably isn't sufficient right now - please let me know what issues you have and I'll try to fix them)
 
-### Model Training
+## Running experiments
+
+### Generating datasets
+
+To generate profiles, run:
+
 ```bash
-MODEL_PATH=gpt2
-
-DATASET=data/$1/
-WEIGHT_DECAY=$2
-N_LAYERS=$3
-GPU=$4
-
-OUTPUT_DIR=<your_dir>/$1_$2_$3
-
-# CUDA_VISIBLE_DEVICES=0,1,2,3 python -m torch.distributed.launch --nproc_per_node=4 --master_port 12345 main.py \
-CUDA_VISIBLE_DEVICES=$GPU python main.py \
---data_dir $DATASET \
---model_name_or_path ${MODEL_PATH} \
---weight_decay $WEIGHT_DECAY \
---output_dir $OUTPUT_DIR \
---max_seq_length 10 \
---max_length 10 \
---block_size 10 \
---train_batch_size 512 \
---eval_batch_size 512 \
---learning_rate 1e-4 \
---gradient_accumulation_steps 1 \
---save_step 50000 \
---save_step_dense 40000 \
---max_steps 1500000 \
---do_train \
---scheduler constant_schedule_with_warmup \
---fp16 \
---evaluate_during_training \
---predict_during_training \
---init_weights \
---add_tokens \
---n_layer $N_LAYERS
+python src/transformer_reasoning/generate_dataset/generate_profiles.py --help
 ```
 
-- For the parameter sharing scheme in Section Appendix E.2, run the above command with ```--n_layer 4``` and ```--add_recurrence``` flag.
+and follow the instructions. `Bipartite` relationships are currently broken; with bipartite relationships X's best friend's best friend is X, (same for child's parent) otherwise every relation is uniformly random. Bipartite relationships can in principle be encoded more efficiently, and we could test whether transformers can actually exploit this structure, but this isn't a top priority right now.
 
-- Pretrained model checkpoints could be downloaded from [here](https://buckeyemailosu-my.sharepoint.com/:f:/g/personal/wang_13930_buckeyemail_osu_edu/EtXABU00W65KvWZ4hqKaq6kB7cag7Gi5UUoXH5qMb9AdTg?e=o73sqm), where the directories are named by "<dataset_name>\_<weight_decay>\_<num_layers>" and contain downsampled checkpoints (full checkpoints are too large to upload) during training, labeled by "checkpoint-<training_step>/".
+A number of profile datasets are already hosted on the huggingface hub. rXX means the number of relations each profile has (no suffix means it has 4 different relations).
+- `EleutherAI/profiles_dataset_1000_uniform_r17`
+- `EleutherAI/profiles_dataset_10000_uniform`
+- `EleutherAI/profiles_dataset_10000_uniform_r17`
+- `EleutherAI/profiles_dataset_15000_uniform`
+- `EleutherAI/profiles_dataset_15000_uniform_r17`
+- `EleutherAI/profiles_dataset_20000_uniform`
+- `EleutherAI/profiles_dataset_25000_uniform`
+- `EleutherAI/profiles_dataset_25000_uniform_r17`
+- `EleutherAI/profiles_dataset_30000_uniform`
+- `EleutherAI/profiles_dataset_50000_uniform`
 
-### Evaluation
+### Training models
+
+Top level training script:
+
 ```bash
-python eval_qa.py --dir <path_to_saved_checkpoints>
+python src/transformer_reasoning/train/train_llama.py --help
 ```
 
-- For LLMs based on non-parametric memory, the cached evaluation scripts and results are included in ```LLM.ipynb```.
+This will train a (typically very small) Llama architecture model with the given parameters. A profiles dataset is required (by default downloaded from the hub). Question and answer text is generated on the fly, and training has a relatively high CPU requirement. There is also the possibility of generating biographies using a mixture of sentence templates (see `src/transformer_reasoning/generate_dataset/generate_biographies.py`), but this is not currently used.
 
 
-### Logit lens & Causal tracing
+### Evaluating models
+
+
 ```bash
-python causal_tracing_{comparison/composition}.py \
-    --dataset <dataset_name> \
-    --model_dir <your_dir> \
-    --save_path <your_save_path> \
-    --num_layer <number_layer_of_model> \
-    --wd <weight_decay_used>
+python src/transformer_reasoning/evaluate/measure_capacity.py --help
 ```
 
-### Citation
+Estimates model capacity according to various encoding `schemes` and produces plots of capacity vs model size. A general assumption is that if the dataset entropy is larger than the estimated maximum model capacity and the estimated (actual) capacity is constant WRT model size, then we might have an encoding scheme that roughly matches the way the model actually encodes the data.
+
+Schemes explanation:
+ - optimal: one hop and two hop question answering requires the same amount of memorization (we think transformers can't do this)
+ - two hop big hash: memorize all of the two hop answers individually
+
+Selection schemes explanation:
+In addition to learning the answers to every question, it is more efficient for models to learn the set of realized names in the profile dataset and encode each relation as a selection from the set of realized names than it is to encode each relation as a selection from the set of all possible names. Given N possible names and n realized names
+ - optimal: it takes n log N - n log n bits to encode the selection
+ - enumerate: it takes n log N bits to encode the selection (relevant if the model is unable to exploit the irrelevance of order to further compress the data)
+ - independent: it takes log N bits to encode each name
+
+We haven't tested precisely which scheme best matches model capacity. This is a high priority for future work.
+
+Probing experiments can also be run with:
+
+```bash
+python src/transformer_reasoning/train/train_probe.py --help
 ```
-@misc{wang2024grokked,
-      title={Grokked Transformers are Implicit Reasoners: A Mechanistic Journey to the Edge of Generalization}, 
-      author={Boshi Wang and Xiang Yue and Yu Su and Huan Sun},
-      year={2024},
-      eprint={2405.15071},
-      archivePrefix={arXiv},
-      primaryClass={cs.CL},
-      url={https://arxiv.org/pdf/2405.15071}
-}
-```
+
+This will train a probe for each layer and token position in the transformer and evaluate the performance of the transformer on the dataset.
