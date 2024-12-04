@@ -99,3 +99,28 @@ Specifically for 2 hop reasoning:
  - Two hop reasoning will generalize to questions where the first hop has only been seen in one-hop questions only if we observe that capacity requirements do not increase more first hops are added to the two hop question set (that were already present in the one hop question set)
    - It's possible that adding additional first hops to the two hop question set incurs a very small capacity cost, which prevents generalization nonetheless, but this cost should still scale with # of first hops added
  - Transformers with CoT can learn 2-hop reasoning with novel first or second hops (that have been seen in one hop questions only), iff two-hop + CoT scales optimally
+
+
+### If there are too many two hop questions and not enough relations, models can get stuck in a local minimum
+
+If the model is always incentivised to better learn the "big hash" two hop algorithm, it will never learn one hop reasoning and so it can never learn the more efficient two hop algorithm.
+
+
+### Models can't learn the 2-hop algorithm if their capacity is too small
+
+This is motivated by observation; models seem to need capacity about 3x the 1-hop capacity to learn 2-hop reasoning at all.
+
+It would be interesting if there was a theory that supported this observation. I have a preliminary theory that does not support it. If, during a training step, the model has a fixed "information budget" that it can allocate to improving first hop or second hop reasoning (i.e. it can learn an extra bit in the first hop or an extra bit in the second hop, or split half a bit each way), then the optimal strategy allocates about equally between both hops.
+
+### Problem types for multi hop reasoning
+
+What kind of multihop reasoning do transformers learn? Which kinds do we care about for safety evaluation?
+
+Deepmind: "We select single-hop facts that are likely well-known, but their composition is unlikely to naturally appear in general text corpora, to minimize the chance of the model developing a shortcut between e1 and e3. We observe that such cases typically occur when the set of possible options for e2 is large, there are numerous e1’s that map to the same e2, and the set of possible options for e3 is not too small (e.g., not person-bloodtype)."
+
+Capacity based analysis: we may get shortcuts when capacity(shortcut) is not much larger than capacity(no shortcut).
+
+ - Capacity(shortcut) ∝ # of "types" of e2 related to e1 * number of possible e3s for each e2 (we need a shortcut for each type of e2)
+ - Capacity(no shortcut) ∝ # of e3s related to each e2 + # of e2s related to e1
+  - No shortcut capacity is 0 if we need to know e3s for each e2 and e2s for each e1 for other reasons
+  - If we don't need that, then shortcut capacity could be less than no shortcut capacity (e.g. only 1 kind of e2 for each e1, many kinds of e2, we don't need e1->e2 mapping)

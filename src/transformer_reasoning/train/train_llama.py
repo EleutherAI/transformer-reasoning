@@ -60,10 +60,11 @@ def main(args):
     rel_str = f'_r{args.relations}' if args.relations else ''
     # Create single model and tokenizer
     model, tokenizer, real_num_params = create_model_and_tokenizer(args.num_params, args.num_layers)
-    # Convert model to bfloat16
+    
+    curr_str = "_curr" if args.curriculum else ""
     sf_str = "sf" if args.optimizer_type == "schedulefree" else "adamw"
     hop_str = f"_hr{args.hop_ratio}" if args.hop_ratio != 0.1 else ""
-    output_dir = f"./results/n{args.N}_p{real_num_params}_omin{min(args.orders)}_omax{max(args.orders)}_wd{args.wd}_l{args.num_layers}_lr{args.lr}_beta1{args.beta1}_{sf_str}{rel_str}{hop_str}"
+    output_dir = f"./results/n{args.N}_p{real_num_params}_omin{min(args.orders)}_omax{max(args.orders)}_wd{args.wd}_l{args.num_layers}_lr{args.lr}_beta1{args.beta1}_{sf_str}{rel_str}{hop_str}{curr_str}"
 
     if args.resume_from_checkpoint:
         checkpoints = glob.glob(os.path.join(output_dir, "checkpoint-*"))
@@ -75,14 +76,19 @@ def main(args):
         tokenizer, args.N, args.qa_ratio, orders=args.orders, relations=args.relations, hop_ratio=args.hop_ratio
     )
 
+    if args.curriculum:
+        # Start with only 1-hop questions
+        train_dataset.order_weights = [1.0, 0.0]
+        print("Starting curriculum learning with 1-hop only")
+
     model_size_mb = calculate_model_size(real_num_params)
     print(f"Estimated model size: {model_size_mb} MB")
     print(f"Epochs: {args.num_epochs}")
 
-    train_single_model(model, train_dataset, onehop_dataset, twohop_dataset, args, output_dir)
+    train_single_model(model, train_dataset, onehop_dataset, twohop_dataset, args, output_dir, args.curriculum)
 
     if args.push_to_hub:
-        hub_id = f"EleutherAI/llama_multihop_n{args.N}_p{real_num_params}_omin{min(args.orders)}_omax{max(args.orders)}_wd{args.wd}_l{args.num_layers}_lr{args.lr}_beta1{args.beta1}_{sf_str}{rel_str}{hop_str}"
+        hub_id = f"EleutherAI/llama_multihop_n{args.N}_p{real_num_params}_omin{min(args.orders)}_omax{max(args.orders)}_wd{args.wd}_l{args.num_layers}_lr{args.lr}_beta1{args.beta1}_{sf_str}{rel_str}{hop_str}{curr_str}"
         model.push_to_hub(hub_id)
         tokenizer.push_to_hub(hub_id)
 
@@ -99,11 +105,10 @@ if __name__ == "__main__":
     parser.add_argument("--push_to_hub", action="store_true", help="Push trained model to hf hub")
     parser.add_argument("--train_batch_size", type=int, default=32, help="Batch size for training")
     parser.add_argument("--eval_batch_size", type=int, default=32, help="Batch size for evaluation")
-    parser.add_argument("--schedule_free", action="store_true", help="Use schedule-free training")
     parser.add_argument("--num_layers", type=int, default=4, help="Number of layers in the model")
-    parser.add_argument("--lr", type=float, default=5e-4, help="Learning rate")
-    parser.add_argument("--beta1", type=float, default=0.9, help="Beta1 for AdamW optimizer")
-    parser.add_argument("--num_epochs", type=int, default=2000, help="Number of epochs to train for")
+    parser.add_argument("--lr", type=float, default=1e-3, help="Learning rate")
+    parser.add_argument("--beta1", type=float, default=0.99, help="Beta1 for AdamW optimizer")
+    parser.add_argument("--num_epochs", type=int, default=4000, help="Number of epochs to train for")
     parser.add_argument("--optimizer_type", type=str, default="schedulefree", choices=["schedulefree", "adamw_cosine", "adamw_linear"],
                         help="Type of optimizer to use (schedulefree or regular adamw with cosine scheduler)")
     parser.add_argument("--num_training_steps", type=int, default=9_000_000,
@@ -111,6 +116,7 @@ if __name__ == "__main__":
     parser.add_argument("--resume_from_checkpoint", action="store_true", help="Resume training from checkpoint")
     parser.add_argument("--num_workers", type=int, default=15, help="Number of workers for data loading")
     parser.add_argument("--relations", type=str, default=None, help="Number of relations in the QA dataset")
+    parser.add_argument("--curriculum", action="store_true", help="Use curriculum learning starting with 1-hop only")
     args = parser.parse_args()
     
     if args.optimizer_type == "adamw" and args.num_training_steps is None:

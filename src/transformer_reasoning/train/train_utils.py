@@ -42,7 +42,9 @@ def train_single_model(
         onehop_dataset, 
         twohop_dataset, 
         args,
-        output_dir=None):
+        output_dir=None,
+        curriculum=False
+        ):
     early_saves = set([int(math.exp(i)) for i in torch.linspace(math.log(100), math.log(100000), 10).tolist()])
     
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
@@ -81,6 +83,8 @@ def train_single_model(
     )
     
     results_dicts = []
+    curriculum_switched = not curriculum  # If not using curriculum, mark as already switched
+    
     # Initialize logging
     log_file = os.path.join('./logs', f"training_log_{datetime.now().strftime('%Y%m%d_%H%M%S')}.jsonl")
 
@@ -152,6 +156,14 @@ def train_single_model(
                 if hasattr(optimizer, 'train'):
                     optimizer.train()
             
+                # Check curriculum condition
+                if curriculum and not curriculum_switched:
+                    onehop_loss = results_dicts[-2]['loss']
+                    if onehop_loss < 1.0:
+                        print("\nSwitching to full curriculum - enabling 2-hop questions")
+                        train_dataset.order_weights = [0.1, 1.0]
+                        curriculum_switched = True
+
                 # Add evaluation metrics to log
                 log_entry.update({
                     'onehop_loss': results_dicts[-2]['loss'],

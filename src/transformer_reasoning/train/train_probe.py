@@ -173,7 +173,8 @@ def main(args):
     latest_checkpoint = checkpoints[-1]
 
     # Get parent directory and checkpoint name
-    checkpoint_parent = os.path.dirname(os.path.dirname(latest_checkpoint))
+    checkpoint_parent = os.path.dirname(latest_checkpoint)
+
     checkpoint_name = os.path.basename(latest_checkpoint)
     
     model = AutoModelForCausalLM.from_pretrained(latest_checkpoint)
