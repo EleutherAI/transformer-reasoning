@@ -18,22 +18,13 @@ from multiprocessing import cpu_count
 T = TypeVar("T", bound=Union[Dataset, DatasetDict])
 
 
-from torch.utils.data import IterableDataset, DataLoader
+from torch.utils.data import DataLoader
 import random
 from schedulefree import AdamWScheduleFree
 from transformers import get_cosine_schedule_with_warmup, get_linear_schedule_with_warmup
 from torch.optim import AdamW as TorchAdamW
 
-from transformer_reasoning.generate_dataset.generate_bios import generate_bio, load_templates
-from transformer_reasoning.generate_dataset.generate_qa_dataset import generate_question
-from transformer_reasoning.utils import get_project_root
-
 from tqdm import tqdm
-
-from torch.profiler import profile, record_function, ProfilerActivity
-
-from threading import Thread
-from queue import Queue
 
 
 def train_single_model(
@@ -249,120 +240,6 @@ class LogConstantCheckpointCallback(TrainerCallback):
             control.should_save = True
             control.should_evaluate = True
         return control
-
-class InfiniteQADataset(IterableDataset):
-    def __init__(self, profiles_dataset, tokenizer, max_seq_len=512, orders=[1,2], qa_indices = [], subjects=None, hop_ratio=0.1):
-        self.profiles = profiles_dataset
-        self.tokenizer = tokenizer
-        self.max_seq_len = max_seq_len
-        self.samples_per_yield = (max_seq_len//15)
-        self.orders = orders
-        self.templates = load_templates(get_project_root() / "generated_data/templates")
-        self.qa_indices = qa_indices
-        self.order_weights = [1/hop_ratio**i for i in range(len(orders))]
-        self.worker_id = None
-        self.num_workers = None
-        self.answer_sep_tokens = tokenizer('Answer:', add_special_tokens=False)['input_ids']
-        self.eos_token = tokenizer.eos_token or "<|endoftext|>"
-        self.question_sep_tokens = tokenizer(self.eos_token, add_special_tokens=False)['input_ids']
-        self.subjects = subjects
-
-    def __len__(self):
-        return len(self.qa_indices*10)
-
-    def __iter__(self):
-        # Get worker info
-        worker_info = torch.utils.data.get_worker_info()
-        if worker_info is not None:
-            self.worker_id = worker_info.id
-            self.num_workers = worker_info.num_workers
-        else:
-            self.worker_id = 0
-            self.num_workers = 1
-
-        # Calculate this worker's portion of steps
-        worker_steps = len(self.qa_indices) * 10 // self.num_workers
-        start_step = self.worker_id * worker_steps
-        end_step = start_step + worker_steps if self.worker_id < self.num_workers - 1 else len(self.qa_indices) * 10
-
-        steps = start_step
-        while steps < end_step:  # Each worker processes its portion
-            steps += 1
-            # But the next epoch will yield different samples
-            # Generate multiple samples (either bios or QA)
-            texts = []
-            answer_token_ranges = []
-            
-            for _ in range(self.samples_per_yield):
-                question = self.generate_qa()
-                texts.append(question)
-
-            # If no tokenizer provided, just return the text chunk
-            if self.tokenizer is None:
-                yield {"text": "\n".join(texts)}
-                continue
-            
-            # Tokenizer-dependent processing
-            sep = self.tokenizer.eos_token or "<|endoftext|>"
-            joined_text = sep.join(texts)
-            output = self.tokenizer(
-                joined_text,
-                max_length=self.max_seq_len,
-                return_attention_mask=False,
-                truncation=True,
-                return_tensors="pt"
-            )
-
-
-            labels = self._create_labels_fast(answer_token_ranges, output["input_ids"])
-
-
-            yield {"input_ids": output["input_ids"].squeeze(0), "text": joined_text, "labels": labels.squeeze(0)}
-
-    def generate_qa(self):
-        profile_idx = random.choice(self.qa_indices)
-        profile = self.profiles[profile_idx]
-        order = random.choices(self.orders, weights=self.order_weights, k=1)[0]
-        subject = random.choice(self.subjects) if self.subjects else None
-        question, _ = generate_question(profile, self.profiles, order, {}, {}, subject)
-        if question:
-            return f"Question: {question['question']} Answer: {question['answer']}"
-        return None
-
-    def _create_labels_fast(self, answer_token_ranges, input_ids):
-        """Create labels by masking everything except answers"""
-        # Initialize mask as zeros
-        mask = torch.zeros_like(input_ids, dtype=torch.bool)
-        
-        # Find starts (Answer:) - need all tokens to match
-        starts = torch.all(torch.stack([
-            input_ids.roll(-i) == token 
-            for i, token in enumerate(self.answer_sep_tokens)
-        ]), dim=0)
-        
-        # Find ends (EOS token)
-        ends = input_ids == self.question_sep_tokens[0]
-        # Convert to indices
-        start_indices = torch.where(starts)[1]
-        end_indices = torch.where(ends)[1] + len(self.question_sep_tokens)-1
-
-        if start_indices[0] > end_indices[0]:
-            end_indices = end_indices[1:]
-        if start_indices[-1] > end_indices[-1]:
-            start_indices = start_indices[:-1]
-        if len(start_indices) != len(end_indices):
-            end_indices = torch.cat([end_indices, torch.tensor([input_ids.shape[1]])])
-
-        # Set mask between each start and its corresponding end
-        for start, end in zip(start_indices, end_indices):
-            if start < end:  # safety check
-                mask[0, start+len(self.answer_sep_tokens):end] = True
-        
-        # Create labels by copying input_ids and masking
-        labels = input_ids.clone()
-        labels[~mask] = -100
-        
-        return labels
 
 
 def calculate_model_size(num_params):
