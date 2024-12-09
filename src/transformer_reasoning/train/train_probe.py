@@ -190,8 +190,7 @@ def main(args):
         profiles_dataset=profiles,
         tokenizer=tokenizer,
         max_seq_len=512,
-        orders=[args.hops],  # Only one-hop questions
-        qa_indices=list(range(len(profiles)))
+        orders=[args.hops],
     )
     
     # Create dataloader

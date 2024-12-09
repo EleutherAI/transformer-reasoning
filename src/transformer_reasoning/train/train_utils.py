@@ -2,7 +2,6 @@ import math
 from transformers import (
     LlamaForCausalLM, LlamaConfig, 
     AutoTokenizer, TrainerCallback, 
-    PreTrainedTokenizerBase
 )
 import torch
 import os
@@ -26,20 +25,37 @@ from torch.optim import AdamW as TorchAdamW
 
 from tqdm import tqdm
 
+from torch.nn.parallel import DistributedDataParallel as DDP
+from torch.utils.data.distributed import DistributedSampler
+import torch.distributed as dist
+
+from transformer_reasoning.train.dataset import InfiniteQADataset
+
 
 def train_single_model(
         model, 
         train_dataset, 
-        onehop_dataset, 
-        twohop_dataset, 
         args,
         output_dir=None,
         curriculum=False
         ):
     early_saves = set([int(math.exp(i)) for i in torch.linspace(math.log(100), math.log(100000), 10).tolist()])
     
-    device = 'cuda' if torch.cuda.is_available() else 'cpu'
+    # Get rank for distributed training
+    is_main_process = True
+    if torch.cuda.device_count() > 1:
+        dist.init_process_group(backend='nccl')
+        local_rank = dist.get_rank()
+        print(f"Local rank: {local_rank}")
+        is_main_process = local_rank == 0
+        torch.cuda.set_device(local_rank)  # Set device based on local rank
+        device = f'cuda:{local_rank}'  # Define device using local rank
+    else:
+        device = 'cuda' if torch.cuda.is_available() else 'cpu'
+    
     model = model.to(device)
+    if torch.cuda.device_count() > 1:
+        model = DDP(model, device_ids=[local_rank])
     
     # Create or load optimizer
     start_step = 0
@@ -48,10 +64,14 @@ def train_single_model(
         checkpoints = glob.glob(os.path.join(output_dir, "checkpoint-*"))
         if checkpoints:
             latest_checkpoint = sorted(checkpoints, key=lambda x: int(x.split("-")[-1]))[-1]
-    optimizer, scheduler, start_step = create_or_load_optimizer(model, args, latest_checkpoint)
+    optimizer, scheduler, start_step, heldout_sets = create_or_load_optimizer(model, args, latest_checkpoint)
     
     global_step = start_step
     
+    if torch.cuda.device_count() > 1:
+            args.train_batch_size = args.train_batch_size // torch.cuda.device_count()
+            args.eval_batch_size = args.eval_batch_size // torch.cuda.device_count()
+
     train_loader = DataLoader(
         train_dataset,
         batch_size=args.train_batch_size,
@@ -59,25 +79,48 @@ def train_single_model(
         pin_memory=True
     )
     
-    onehop_loader = DataLoader(
-        onehop_dataset,
-        batch_size=args.eval_batch_size,
-        num_workers=args.num_workers,
-        pin_memory=True
-    )
-
-    twohop_loader = DataLoader(
-        twohop_dataset,
-        batch_size=args.eval_batch_size,
-        num_workers=args.num_workers,
-        pin_memory=True
-    )
+    
+    # Create evaluation datasets using the same held-out sets as train_dataset
+    eval_modes = [
+        "train_onehop",  # 1-hop training questions
+        "train_twohop",  # 2-hop training questions
+        "eval_random",   # Random 2-hop eval
+        "eval_first_people",
+        "eval_relations",
+        "eval_person_relation_pairs",
+        "eval_second_people",
+        "eval_second_attributes",
+        "eval_second_person_attribute_pairs"
+    ]
+    
+    eval_datasets = {
+        mode: InfiniteQADataset(
+            profiles_dataset=train_dataset.profiles,
+            tokenizer=train_dataset.tokenizer,
+            max_seq_len=args.max_seq_length,
+            orders=[1] if mode == "train_onehop" else [2],
+            heldout_fraction=0.1,
+            mode=mode.replace("train_onehop", "train").replace("train_twohop", "train"),
+            heldout_sets=heldout_sets  # Pass loaded holdout sets
+        ) for mode in eval_modes
+    }
+    
+    eval_loaders = {
+        mode: DataLoader(
+            dataset,
+            batch_size=args.eval_batch_size,
+            num_workers=args.num_workers,
+            pin_memory=True
+        ) for mode, dataset in eval_datasets.items()
+    }
     
     results_dicts = []
-    curriculum_switched = not curriculum  # If not using curriculum, mark as already switched
+    curriculum_switched = not curriculum
     
-    # Initialize logging
-    log_file = os.path.join('./logs', f"training_log_{datetime.now().strftime('%Y%m%d_%H%M%S')}.jsonl")
+    # Initialize logging only on main process
+    log_file = None
+    if is_main_process:
+        log_file = os.path.join('./logs', f"training_log_{datetime.now().strftime('%Y%m%d_%H%M%S')}.jsonl")
 
     # Training loop
     for epoch in range(args.num_epochs):
@@ -86,7 +129,7 @@ def train_single_model(
             optimizer.train()
 
         pbar = tqdm(train_loader, desc=f"Epoch {epoch}")
-        for batch in pbar:
+        for i, batch in enumerate(pbar):
             batch = {k: v.to(model.device) if hasattr(v, 'to') else v 
                     for k, v in batch.items()}
             del batch['text']
@@ -106,7 +149,7 @@ def train_single_model(
             should_save = (global_step < 100000 and global_step in early_saves) or \
                 (global_step >= 100000 and global_step % 100000 == 0)
             
-            if should_save:
+            if should_save and is_main_process:
                 log_entry = {
                     'step': global_step,
                     'epoch': epoch,
@@ -118,24 +161,41 @@ def train_single_model(
                 if hasattr(optimizer, 'eval'):
                     optimizer.eval()
                 
-                results_dicts.append(evaluate_single_model(model, onehop_loader, global_step, 1))
-                results_dicts.append(evaluate_single_model(model, twohop_loader, global_step, 2))
+                # Evaluate on all modes
+                for mode, loader in eval_loaders.items():
+                    results = evaluate_single_model(model, loader, global_step, mode)
+                    results_dicts.append(results)
+                    
+                    # Add to log entry
+                    log_entry[f'{mode}_loss'] = results['loss']
+                    
+                    # Update progress bar
+                    pbar.set_postfix({
+                        **{f'{mode}_loss': results['loss'] for mode in eval_modes},
+                        'step': global_step
+                    })
 
                 # Save checkpoint
                 if output_dir:
                     model_path = f"{output_dir}/checkpoint-{global_step}"
-                    model.save_pretrained(model_path)
+                    if isinstance(model, DDP):
+                        model.module.save_pretrained(model_path)
+                    else:
+                        model.save_pretrained(model_path)
+                    
                     # Save optimizer and scheduler state
                     optimizer_state = {
                         'optimizer_state_dict': optimizer.state_dict(),
                         'step': global_step,
-                        'onehop_loss': results_dicts[-2]['loss'],
-                        'twohop_loss': results_dicts[-1]['loss']
+                        'heldout_sets': train_dataset.heldout_sets,  # Add holdout sets
+                        **{f'{mode}_loss': results_dicts[-len(eval_modes) + i]['loss'] 
+                        for i, mode in enumerate(eval_modes)}
                     }
                     if scheduler:
                         optimizer_state['scheduler_state_dict'] = scheduler.state_dict()
                     torch.save(optimizer_state, f"{model_path}/optimizer.pt")
                 
+                    # Save results
                     results_df = pd.DataFrame(results_dicts)
                     if os.path.exists(f"{output_dir}/eval_results.csv"):
                         results_df.to_csv(f"{output_dir}/eval_results.csv", mode='a', header=False, index=False)
@@ -147,39 +207,32 @@ def train_single_model(
                 if hasattr(optimizer, 'train'):
                     optimizer.train()
             
-                # Check curriculum condition
+                # Check curriculum condition (using train_twohop loss)
                 if curriculum and not curriculum_switched:
-                    onehop_loss = results_dicts[-2]['loss']
-                    if onehop_loss < 1.0:
+                    train_twohop_loss = next(r['loss'] for r in results_dicts[-len(eval_modes):] 
+                                           if r['mode'] == 'train_twohop')
+                    if train_twohop_loss < 1.0:
                         print("\nSwitching to full curriculum - enabling 2-hop questions")
                         train_dataset.order_weights = [0.1, 1.0]
                         curriculum_switched = True
 
-                # Add evaluation metrics to log
-                log_entry.update({
-                    'onehop_loss': results_dicts[-2]['loss'],
-                    'twohop_loss': results_dicts[-1]['loss'],
-                    'parameter_l2': results_dicts[-1]['parameter_l2']
-                })
+                # Write log entry
+                if log_file:
+                    with open(log_file, 'a') as f:
+                        f.write(json.dumps(log_entry) + '\n')
 
-                pbar.set_postfix({
-                    'onehop_loss': results_dicts[-2]['loss'], 
-                    'twohop_loss': results_dicts[-1]['loss'], 
-                    'step': global_step
-                })
-                with open(log_file, 'a') as f:
-                    f.write(json.dumps(log_entry) + '\n')
-
-def evaluate_single_model(model, eval_loader, global_step, hop_count):
+def evaluate_single_model(model, eval_loader, global_step, mode):
+    """Evaluate model on a specific evaluation mode"""
     results_dict = {
         'loss': 0,
         'global_step': global_step,
+        'mode': mode,
         'parameter_l2': 0
     }
 
     with torch.no_grad():
         eval_questions = 0
-        pbar = tqdm(eval_loader, desc=f"Evaluating {hop_count}-hop")
+        pbar = tqdm(eval_loader, desc=f"Evaluating {mode}")
         for eval_batch in pbar:
             labels = eval_batch['labels']
             last_neg = labels[:,-1] == -100
@@ -195,7 +248,6 @@ def evaluate_single_model(model, eval_loader, global_step, hop_count):
                 input_ids=filtered_inputs.to(model.device),
                 labels=filtered_labels.to(model.device)
             )
-            
             results_dict['loss'] += outputs.loss.item() * is_pos.sum().item()
             
             all_params = torch.cat([p.flatten() for p in model.parameters()])
@@ -206,7 +258,7 @@ def evaluate_single_model(model, eval_loader, global_step, hop_count):
                 break
     
     results_dict['loss'] = results_dict['loss'] / eval_questions
-    print(f"Step {global_step}: Evaluation Loss = {results_dict['loss']}")
+    print(f"Step {global_step}: {mode} Loss = {results_dict['loss']}")
     return results_dict
 
 def get_qa_token_ranges(text: str, tokenizer) -> List[int]:
@@ -273,92 +325,6 @@ def create_model_and_tokenizer(num_params, num_layers=4):
     print(f"Model has {real_num_params} parameters")
 
     return model, tokenizer, real_num_params
-    
-def chunk_and_tokenize(
-    data: T,
-    tokenizer: PreTrainedTokenizerBase,
-    *,
-    format: str = "torch",
-    num_proc: int = cpu_count() // 2,
-    text_key: str = "text",
-    max_seq_len: int = 2048,
-    return_final_batch: bool = False,
-    load_from_cache_file: bool = True,
-) -> T:
-    """Perform GPT-style chunking and tokenization on a dataset.
-
-    The resulting dataset will consist entirely of chunks exactly `max_seq_len` tokens
-    long. Long sequences will be split into multiple chunks, and short sequences will
-    be merged with their neighbors, using `eos_token` as a separator. The fist token
-    will also always be an `eos_token`.
-
-    Args:
-        data: The dataset to chunk and tokenize.
-        tokenizer: The tokenizer to use.
-        format: The format to return the dataset in, passed to `Dataset.with_format`.
-        num_proc: The number of processes to use for tokenization.
-        text_key: The key in the dataset to use as the text to tokenize.
-        max_seq_len: The maximum length of a batch of input ids.
-        return_final_batch: Whether to return the final batch, which may be smaller
-            than the others.
-        load_from_cache_file: Whether to load from the cache file.
-
-    Returns:
-        The chunked and tokenized dataset.
-    """
-
-    def _tokenize_fn(x: dict[str, list]):
-        chunk_size = min(tokenizer.model_max_length, max_seq_len)
-        sep = tokenizer.eos_token or "<|endoftext|>"
-        joined_text = sep.join([""] + x[text_key])
-        output = tokenizer(
-            # Concatenate all the samples together, separated by the EOS token.
-            joined_text,  # start with an eos token
-            max_length=chunk_size,
-            return_attention_mask=False,
-            return_overflowing_tokens=True,
-            truncation=True,
-        )
-
-        if overflow := output.pop("overflowing_tokens", None):
-            # Slow Tokenizers return unnested lists of ints
-            assert isinstance(output.input_ids[0], int)
-
-            # Chunk the overflow into batches of size `chunk_size`
-            chunks = [output["input_ids"]] + [
-                overflow[i * chunk_size : (i + 1) * chunk_size]
-                for i in range(math.ceil(len(overflow) / chunk_size))
-            ]
-            output = {"input_ids": chunks}
-
-        if not return_final_batch:
-            # We know that the last sample will almost always be less than the max
-            # number of tokens, and we don't want to pad, so we just drop it.
-            output = {k: v[:-1] for k, v in output.items()}
-
-        output_batch_size = len(output["input_ids"])
-
-        if output_batch_size == 0:
-            raise ValueError(
-                "Not enough data to create a single complete batch."
-                " Either allow the final batch to be returned,"
-                " or supply more data."
-            )
-
-        return output
-
-    data = data.map(
-        _tokenize_fn,
-        # Batching is important for ensuring that we don't waste tokens
-        # since we always throw away the last element of the batch we
-        # want to keep the batch size as large as possible
-        batched=True,
-        batch_size=2048,
-        num_proc=num_proc,
-        remove_columns=get_columns_all_equal(data),
-        load_from_cache_file=load_from_cache_file,
-    )
-    return data.with_format(format, columns=["input_ids"])
 
 
 
@@ -423,6 +389,7 @@ def create_or_load_optimizer(model, args, checkpoint_path=None):
             if scheduler and 'scheduler_state_dict' in optimizer_state:
                 scheduler.load_state_dict(optimizer_state['scheduler_state_dict'])
             start_step = optimizer_state['step']
+            heldout_sets = optimizer_state.get('heldout_sets')  # Get holdout sets if they exist
             print(f"Loaded optimizer state from step {start_step}")
     
-    return optimizer, scheduler, start_step
+    return optimizer, scheduler, start_step, heldout_sets   

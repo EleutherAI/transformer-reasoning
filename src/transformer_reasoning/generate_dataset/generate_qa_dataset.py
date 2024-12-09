@@ -37,64 +37,86 @@ RELATIONS = [
 def get_available_relations(profile):
     return [rel for rel in RELATIONS if profile.get(rel) and profile[rel]['name']]
 
-def generate_question(profile: Dict, profiles: Dataset, order: int, holdout_subjs: List[str], holdout_rels: List[str], subject: str = None) -> Union[Dict, None]:
-    name = profile['name']
-    available_relations = [rel for rel in get_available_relations(profile) if rel not in holdout_rels]
-    available_subjects = [subj for subj in ATTRIBUTES + available_relations if subj not in holdout_subjs]
-    chosen_subject = None
-    chosen_relations = {0: None,1: None, 2: None}
-    if order == 1:
-        if not available_subjects:
-            return None
-        if not subject:
-            subject = random.choice(available_subjects)
-        chosen_subject = subject
-        question = FIRST_ORDER_TEMPLATE.format(name=name, subject=subject.replace('_', ' '))
-        if subject in RELATIONS:
-            answer = profile[subject]['name']
-        else:
-            answer = profile[subject]
-    elif order == 2:
-        if not available_relations or not available_subjects:
-            return None
-        relation = random.choice(available_relations)
-        if profile[relation]['index']==-1:
-            return None
-        related_profile = profiles[profile[relation]['index']]
-        if not subject:
-            subject = random.choice(available_subjects)
-        chosen_subject = subject
-        chosen_relations[1] = relation
-        question = SECOND_ORDER_TEMPLATE.format(name=profile['name'], relation=relation.replace('_', ' '), subject=subject.replace('_', ' '))
-        if subject in RELATIONS:
-            answer = related_profile[subject]['name']
-        else:
-            answer = related_profile[subject]
-        assert profile[relation]['name'] == related_profile['name']
-    else:  # order == 3
-        if len(available_relations) < 2 or not available_subjects:
-            return None
-        relation1 = random.choice([rel for rel in available_relations])
-        # Double inverse is the same relation; circular relations accepted
-        relation2 = random.choice([rel for rel in available_relations])
-        if not subject:
-            subject = random.choice(available_subjects)
-        related_profile1 = profiles[profile[relation1]['index']]
-        related_profile2 = profiles[related_profile1[relation2]['index']]
-        if profile[relation2]['index']==-1 or related_profile2[relation1]['index']==-1:
-            return None
-        question = THIRD_ORDER_TEMPLATE.format(name=profile['name'], relation1=relation1.replace('_', ' '), 
-                                        relation2=relation2.replace('_', ' '), subject=subject.replace('_', ' '))
-        chosen_subject = subject
-        chosen_relations[1] = relation1
-        chosen_relations[2] = relation2
-        if subject in RELATIONS:
-            answer = related_profile2[subject]['name']
-        else:
-            answer = related_profile2[subject]
-        assert related_profile1['name'] == profile[relation1]['name']
-        assert related_profile2['name'] == related_profile1[relation2]['name']
+def maybe_generate_question(profile: Dict, profiles: Dataset, order: int, mode="train", heldout_sets=None) -> Union[Dict, None]:
+    """
+    Generate a question based on the given profile and mode.
     
+    Args:
+        profile: The source profile
+        profiles: The complete profiles dataset
+        order: Question order (1 or 2)
+        mode: One of ["train", "eval_random", "eval_first_people", "eval_relations", 
+              "eval_person_relation_pairs", "eval_second_people", "eval_second_attributes",
+              "eval_second_person_attribute_pairs"]
+        heldout_sets: Dictionary containing the held-out sets for each eval mode
+    """
+    profile_idx = profile['index']
+    name = profile['name']
+    
+    # Get available relations and subjects
+    available_relations = get_available_relations(profile)
+    available_subjects = ATTRIBUTES + available_relations
+
+    if order == 1:
+        if mode != "train":  # Eval modes only use 2-hop questions
+            return None
+            
+        subject = random.choice(available_subjects)
+        question = FIRST_ORDER_TEMPLATE.format(name=name, subject=subject.replace('_', ' '))
+        answer = profile[subject]['name'] if subject in RELATIONS else profile[subject]
+        
+    elif order == 2:
+        if not available_relations:
+            return None
+            
+        relation = random.choice(available_relations)
+        if profile[relation]['index'] == -1:
+            return None
+            
+        related_profile = profiles[profile[relation]['index']]
+        subject = random.choice(available_subjects)
+        
+        # Check if this combination should be included based on mode
+        if mode == "train":
+            # Exclude all held-out combinations
+            if (profile_idx in heldout_sets["first_people"] or
+                relation in heldout_sets["relations"] or
+                (profile_idx, relation) in heldout_sets["person_relation_pairs"] or
+                related_profile['index'] in heldout_sets["second_people"] or
+                subject in heldout_sets["second_attributes"] or
+                (related_profile['index'], subject) in heldout_sets["second_person_attribute_pairs"]):
+                return None
+                
+        elif mode != "eval_random":
+            # For eval modes, include only the specific held-out combinations
+            eval_type = mode.replace("eval_", "")
+            if eval_type == "first_people":
+                if profile_idx not in heldout_sets["first_people"]:
+                    return None
+            elif eval_type == "relations":
+                if relation not in heldout_sets["relations"]:
+                    return None
+            elif eval_type == "person_relation_pairs":
+                if (profile_idx, relation) not in heldout_sets["person_relation_pairs"]:
+                    return None
+            elif eval_type == "second_people":
+                if related_profile['index'] not in heldout_sets["second_people"]:
+                    return None
+            elif eval_type == "second_attributes":
+                if subject not in heldout_sets["second_attributes"]:
+                    return None
+            elif eval_type == "second_person_attribute_pairs":
+                if (related_profile['index'], subject) not in heldout_sets["second_person_attribute_pairs"]:
+                    return None
+        
+        question = SECOND_ORDER_TEMPLATE.format(
+            name=name, 
+            relation=relation.replace('_', ' '), 
+            subject=subject.replace('_', ' ')
+        )
+        answer = related_profile[subject]['name'] if subject in RELATIONS else related_profile[subject]
+        assert profile[relation]['name'] == related_profile['name']
+
     if isinstance(answer, datetime.date):
         answer = answer.strftime('%Y-%m-%d')
 
@@ -102,9 +124,6 @@ def generate_question(profile: Dict, profiles: Dataset, order: int, holdout_subj
         "question": question,
         "answer": str(answer),
         "order": order
-    }, {
-        "chosen_subject": chosen_subject,
-        "chosen_relations": chosen_relations
     }
 
 def generate_questions_for_profile(profile, profiles, holdout_subjs, holdout_rels, qs_per_profile, min_order = 1):
@@ -116,7 +135,7 @@ def generate_questions_for_profile(profile, profiles, holdout_subjs, holdout_rel
         order_holdout_rels = holdout_rels.get(order, []).copy()
         
         for _ in range(min(math.ceil(qs_per_profile), (len(ATTRIBUTES) + len(RELATIONS))**order)):
-            question_params = generate_question(profile, profiles, order, order_holdout_subjs, order_holdout_rels)
+            question_params = maybe_generate_question(profile, profiles, order, order_holdout_subjs, order_holdout_rels)
             if question_params:
                 question, params = question_params
                 subject = params['chosen_subject']

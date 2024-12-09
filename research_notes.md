@@ -118,6 +118,14 @@ What kind of multihop reasoning do transformers learn? Which kinds do we care ab
 
 Deepmind: "We select single-hop facts that are likely well-known, but their composition is unlikely to naturally appear in general text corpora, to minimize the chance of the model developing a shortcut between e1 and e3. We observe that such cases typically occur when the set of possible options for e2 is large, there are numerous e1’s that map to the same e2, and the set of possible options for e3 is not too small (e.g., not person-bloodtype)."
 
+Say a "type" of e2 is an attribute that e1s have - so a person might have "employer", "university", "bloodtype", etc. Possible e2s are possible values for a particular attribute.
+
+Capacity based analysis: we may get shortcuts when capacity(shortcut) is not much larger than capacity(no shortcut).
+
+ - Capacity(shortcut) ∝ # of "types" of e2 related to e1 * number of possible e3s for each e2 (we need a shortcut for each type of e2)
+ - Capacity(no shortcut) ∝ # of e3s related to each e2 + # of e2s related to e1
+  - No shortcut capacity is 0 if we need to know e3s for each e2 and e2s for each e1 for other reasonsSay a "type" of e2 is an attribute that e1s have - so a person might have "employer", "university", "bloodtype", etc. Possible e2s are possible values for a particular attribute.
+
 Capacity based analysis: we may get shortcuts when capacity(shortcut) is not much larger than capacity(no shortcut).
 
  - Capacity(shortcut) ∝ # of "types" of e2 related to e1 * number of possible e3s for each e2 (we need a shortcut for each type of e2)

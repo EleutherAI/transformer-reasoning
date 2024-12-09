@@ -97,14 +97,12 @@ def evaluate_checkpoints(
             profiles_dataset, 
             tokenizer, 
             orders=[1], 
-            qa_indices=range(len(profiles_dataset)),
             subjects=[subject]
         )
         qa_dataset_2 = InfiniteQADataset(
             profiles_dataset, 
             tokenizer, 
             orders=[2], 
-            qa_indices=range(len(profiles_dataset)),
             subjects=[subject]
         )
     

@@ -114,7 +114,6 @@ if __name__ == "__main__":
         profiles_dataset, 
         None, 
         max_seq_len=512,
-        qa_indices=list(range(len(profiles_dataset))),
         qa_prob=1
     )
     

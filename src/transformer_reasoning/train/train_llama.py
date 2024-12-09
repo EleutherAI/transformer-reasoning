@@ -4,45 +4,11 @@ import torch
 from transformers import (
     LlamaForCausalLM
 )
-from datasets import load_dataset
-from transformer_reasoning.train.train_utils import calculate_model_size, create_model_and_tokenizer, InfiniteQADataset, train_single_model
-
 import glob
 import os
 
-
-def load_and_prepare_datasets(tokenizer, N=250000, qa_ratio=0.1, orders=None, relations=None, hop_ratio=0.1):
-    relation_str = f'_r{relations}' if relations else ''
-    # Load profiles dataset
-    profiles = load_dataset(f"EleutherAI/profiles_dataset_{N}_uniform{relation_str}", keep_in_memory=True)['train']
-    # Create infinite training dataset
-    train_dataset = InfiniteQADataset(
-        profiles_dataset=profiles,
-        tokenizer=tokenizer,
-        max_seq_len=512,
-        orders=orders or [1,2],
-        qa_indices=list(range(len(profiles))),
-        hop_ratio=hop_ratio
-    )
-    
-    onehop_dataset = InfiniteQADataset(
-        profiles_dataset=profiles,
-        tokenizer=tokenizer,
-        max_seq_len=512,
-        orders=[1],
-        qa_indices=list(range(len(profiles))),
-        hop_ratio=hop_ratio
-    )
-
-    twohop_dataset = InfiniteQADataset(
-        profiles_dataset=profiles,
-        tokenizer=tokenizer,
-        max_seq_len=512,
-        orders=[2],
-        qa_indices=list(range(len(profiles))),
-        hop_ratio=hop_ratio
-    )
-    return train_dataset, onehop_dataset, twohop_dataset
+from transformer_reasoning.train.train_utils import calculate_model_size, create_model_and_tokenizer, train_single_model
+from transformer_reasoning.train.dataset import load_and_prepare_datasets
 
 
 def find_question_end(text, tokenizer):
@@ -73,7 +39,7 @@ def main(args):
         model = LlamaForCausalLM.from_pretrained(latest_checkpoint)
 
     train_dataset, onehop_dataset, twohop_dataset = load_and_prepare_datasets(
-        tokenizer, args.N, args.qa_ratio, orders=args.orders, relations=args.relations, hop_ratio=args.hop_ratio
+        tokenizer, args.N, orders=args.orders, relations=args.relations, hop_ratio=args.hop_ratio
     )
 
     if args.curriculum:
@@ -85,7 +51,7 @@ def main(args):
     print(f"Estimated model size: {model_size_mb} MB")
     print(f"Epochs: {args.num_epochs}")
 
-    train_single_model(model, train_dataset, onehop_dataset, twohop_dataset, args, output_dir, args.curriculum)
+    train_single_model(model, train_dataset, args, output_dir, args.curriculum)
 
     if args.push_to_hub:
         hub_id = f"EleutherAI/llama_multihop_n{args.N}_p{real_num_params}_omin{min(args.orders)}_omax{max(args.orders)}_wd{args.wd}_l{args.num_layers}_lr{args.lr}_beta1{args.beta1}_{sf_str}{rel_str}{hop_str}{curr_str}"
@@ -117,6 +83,7 @@ if __name__ == "__main__":
     parser.add_argument("--num_workers", type=int, default=15, help="Number of workers for data loading")
     parser.add_argument("--relations", type=str, default=None, help="Number of relations in the QA dataset")
     parser.add_argument("--curriculum", action="store_true", help="Use curriculum learning starting with 1-hop only")
+    parser.add_argument("--max_seq_length", type=int, default=512, help="Maximum sequence length")
     args = parser.parse_args()
     
     if args.optimizer_type == "adamw" and args.num_training_steps is None:
