@@ -25,7 +25,6 @@ def test_checkpoint_eval_consistency():
         max_seq_len=512,
         orders=[1],
         qa_prob=1,
-        qa_indices=list(range(1000))  # Only use first 100 profiles for QA
     )
     
     # Create dummy eval datasets (required by train_parallel_models)
@@ -35,7 +34,6 @@ def test_checkpoint_eval_consistency():
         max_seq_len=512,
         orders=[1],
         qa_prob=1,
-        qa_indices=list(range(1000))
     )
     
     twohop_dataset = InfiniteQADataset(
@@ -44,7 +42,6 @@ def test_checkpoint_eval_consistency():
         max_seq_len=512,
         orders=[2],
         qa_prob=1,
-        qa_indices=list(range(1000))
     )
     
     # Set up models dict
