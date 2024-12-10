@@ -24,7 +24,12 @@ dependencies = [
     "accelerate",
     "matplotlib",
     "tokenizers",
-    "schedulefree"
+    "schedulefree",
+    "jax",
+    "jaxlib",
+    "flax",
+    "optax",
+    "scipy"
 ]
 
 requires-python = ">=3.10"

@@ -20,7 +20,7 @@ from transformer_reasoning.generate_dataset.generate_qa_dataset import maybe_gen
 from transformer_reasoning.utils import get_project_root
 
 
-def load_and_prepare_datasets(tokenizer, N=250000, orders=None, relations=None, hop_ratio=0.1, jax=False):
+def load_and_prepare_datasets(tokenizer, N=250000, orders=None, relations=None, hop_ratio=0.1, jax=False, heldout_sets=None):
 
     dataset_class = JAXQADataset if jax else InfiniteQADataset
 
@@ -33,32 +33,16 @@ def load_and_prepare_datasets(tokenizer, N=250000, orders=None, relations=None, 
         tokenizer=tokenizer,
         max_seq_len=512,
         orders=orders or [1,2],
-        qa_indices=list(range(len(profiles))),
-        hop_ratio=hop_ratio
+        hop_ratio=hop_ratio,
+        heldout_fraction=0.05,
+        heldout_sets=heldout_sets
     )
     
-    onehop_dataset = dataset_class(
-        profiles_dataset=profiles,
-        tokenizer=tokenizer,
-        max_seq_len=512,
-        orders=[1],
-        qa_indices=list(range(len(profiles))),
-        hop_ratio=hop_ratio
-    )
-
-    twohop_dataset = dataset_class(
-        profiles_dataset=profiles,
-        tokenizer=tokenizer,
-        max_seq_len=512,
-        orders=[2],
-        qa_indices=list(range(len(profiles))),
-        hop_ratio=hop_ratio
-    )
-    return train_dataset, onehop_dataset, twohop_dataset
+    return train_dataset
 
 
 class InfiniteQADataset(IterableDataset):
-    def __init__(self, profiles_dataset, tokenizer, max_seq_len=512, orders=[1,2], qa_indices=[], subjects=None, 
+    def __init__(self, profiles_dataset, tokenizer, max_seq_len=512, orders=[1,2], subjects=None, 
                  hop_ratio=0.1, heldout_fraction=0.02, mode="train", heldout_sets=None):
         self.profiles = profiles_dataset
         self.tokenizer = tokenizer
@@ -96,9 +80,9 @@ class InfiniteQADataset(IterableDataset):
                             max(1, int(n_profiles * n_relations * fraction)))
             ),
             "second_people": set(random.sample(range(n_profiles), max(1, int(n_profiles * fraction)))),
-            "second_attributes": set(random.sample(ATTRIBUTES, max(1, int(n_attributes * fraction)))),
+            "second_attributes": set(random.sample(ATTRIBUTES + RELATIONS, max(1, int(n_attributes * fraction)))),
             "second_person_attribute_pairs": set(
-                random.sample([(p, a) for p in range(n_profiles) for a in ATTRIBUTES],
+                random.sample([(p, a) for p in range(n_profiles) for a in ATTRIBUTES + RELATIONS],
                             max(1, int(n_profiles * n_attributes * fraction)))
             )
         }

@@ -26,15 +26,14 @@ from torch.optim import AdamW as TorchAdamW
 from tqdm import tqdm
 
 from torch.nn.parallel import DistributedDataParallel as DDP
-from torch.utils.data.distributed import DistributedSampler
 import torch.distributed as dist
 
-from transformer_reasoning.train.dataset import InfiniteQADataset
+from transformer_reasoning.train.dataset import InfiniteQADataset, load_and_prepare_datasets
 
 
 def train_single_model(
-        model, 
-        train_dataset, 
+        model,
+        tokenizer,
         args,
         output_dir=None,
         curriculum=False
@@ -43,18 +42,18 @@ def train_single_model(
     
     # Get rank for distributed training
     is_main_process = True
-    if torch.cuda.device_count() > 1:
+    if torch.cuda.device_count() > 1 and 'WORLD_SIZE' in os.environ:
         dist.init_process_group(backend='nccl')
         local_rank = dist.get_rank()
         print(f"Local rank: {local_rank}")
         is_main_process = local_rank == 0
-        torch.cuda.set_device(local_rank)  # Set device based on local rank
-        device = f'cuda:{local_rank}'  # Define device using local rank
+        torch.cuda.set_device(local_rank)
+        device = f'cuda:{local_rank}'
     else:
         device = 'cuda' if torch.cuda.is_available() else 'cpu'
     
     model = model.to(device)
-    if torch.cuda.device_count() > 1:
+    if dist.is_initialized():
         model = DDP(model, device_ids=[local_rank])
     
     # Create or load optimizer
@@ -66,11 +65,25 @@ def train_single_model(
             latest_checkpoint = sorted(checkpoints, key=lambda x: int(x.split("-")[-1]))[-1]
     optimizer, scheduler, start_step, heldout_sets = create_or_load_optimizer(model, args, latest_checkpoint)
     
+    train_dataset = load_and_prepare_datasets(
+        tokenizer,
+        args.N, 
+        orders=args.orders, 
+        relations=args.relations, 
+        hop_ratio=args.hop_ratio, 
+        heldout_sets=heldout_sets
+    )
+
+    if args.curriculum:
+        # Start with only 1-hop questions
+        train_dataset.order_weights = [1.0, 0.0]
+        print("Starting curriculum learning with 1-hop only")
+
     global_step = start_step
     
-    if torch.cuda.device_count() > 1:
-            args.train_batch_size = args.train_batch_size // torch.cuda.device_count()
-            args.eval_batch_size = args.eval_batch_size // torch.cuda.device_count()
+    if dist.is_initialized():
+        args.train_batch_size = args.train_batch_size // dist.get_world_size()
+        args.eval_batch_size = args.eval_batch_size // dist.get_world_size()
 
     train_loader = DataLoader(
         train_dataset,
@@ -79,12 +92,10 @@ def train_single_model(
         pin_memory=True
     )
     
-    
     # Create evaluation datasets using the same held-out sets as train_dataset
     eval_modes = [
-        "train_onehop",  # 1-hop training questions
-        "train_twohop",  # 2-hop training questions
-        "eval_random",   # Random 2-hop eval
+        "train_onehop",
+        "train_twohop",
         "eval_first_people",
         "eval_relations",
         "eval_person_relation_pairs",
@@ -99,9 +110,8 @@ def train_single_model(
             tokenizer=train_dataset.tokenizer,
             max_seq_len=args.max_seq_length,
             orders=[1] if mode == "train_onehop" else [2],
-            heldout_fraction=0.1,
             mode=mode.replace("train_onehop", "train").replace("train_twohop", "train"),
-            heldout_sets=heldout_sets  # Pass loaded holdout sets
+            heldout_sets=train_dataset.heldout_sets
         ) for mode in eval_modes
     }
     
@@ -122,13 +132,20 @@ def train_single_model(
     if is_main_process:
         log_file = os.path.join('./logs', f"training_log_{datetime.now().strftime('%Y%m%d_%H%M%S')}.jsonl")
 
+    # Store eval results at the start
+    eval_losses = {}
+    epoch = 0
+    if is_main_process:
+        pbar = tqdm(train_loader, desc=f"Epoch {epoch}")
+    else:
+        pbar = train_loader
+
     # Training loop
     for epoch in range(args.num_epochs):
         model.train()
         if hasattr(optimizer, 'train'):
             optimizer.train()
 
-        pbar = tqdm(train_loader, desc=f"Epoch {epoch}")
         for i, batch in enumerate(pbar):
             batch = {k: v.to(model.device) if hasattr(v, 'to') else v 
                     for k, v in batch.items()}
@@ -149,6 +166,15 @@ def train_single_model(
             should_save = (global_step < 100000 and global_step in early_saves) or \
                 (global_step >= 100000 and global_step % 100000 == 0)
             
+            # Update progress bar with both train and stored eval losses
+            postfix = {
+                'step': global_step,
+                'train_loss': loss.item(),
+                **{f'{mode}_loss': eval_losses.get(mode, 0) for mode in eval_modes}
+            }
+            if is_main_process:
+                pbar.set_postfix(postfix)
+
             if should_save and is_main_process:
                 log_entry = {
                     'step': global_step,
@@ -162,17 +188,20 @@ def train_single_model(
                     optimizer.eval()
                 
                 # Evaluate on all modes
+                results = {}
                 for mode, loader in eval_loaders.items():
-                    results = evaluate_single_model(model, loader, global_step, mode)
-                    results_dicts.append(results)
+                    results[mode] = evaluate_single_model(model, loader, global_step, mode)
+                    results_dicts.append(results[mode])
                     
                     # Add to log entry
-                    log_entry[f'{mode}_loss'] = results['loss']
+                    log_entry[f'{mode}_loss'] = results[mode]['loss']
                     
-                    # Update progress bar
+                # Update progress bar
+                if is_main_process:
                     pbar.set_postfix({
-                        **{f'{mode}_loss': results['loss'] for mode in eval_modes},
-                        'step': global_step
+                        **{f'{mode}_loss': results[mode]['loss'] for mode in eval_modes},
+                        'step': global_step,
+                        "train_loss": loss.item()
                     })
 
                 # Save checkpoint
@@ -189,15 +218,17 @@ def train_single_model(
                         'step': global_step,
                         'heldout_sets': train_dataset.heldout_sets,  # Add holdout sets
                         **{f'{mode}_loss': results_dicts[-len(eval_modes) + i]['loss'] 
-                        for i, mode in enumerate(eval_modes)}
+                        for i, mode in enumerate(eval_modes)},
+                        'train_loss': loss.item()
                     }
                     if scheduler:
                         optimizer_state['scheduler_state_dict'] = scheduler.state_dict()
                     torch.save(optimizer_state, f"{model_path}/optimizer.pt")
                 
-                    # Save results
                     results_df = pd.DataFrame(results_dicts)
+                    # Save results
                     if os.path.exists(f"{output_dir}/eval_results.csv"):
+                        results_df = results_df[results_df['global_step'] == global_step]
                         results_df.to_csv(f"{output_dir}/eval_results.csv", mode='a', header=False, index=False)
                     else:
                         results_df.to_csv(f"{output_dir}/eval_results.csv", index=False)
@@ -220,6 +251,9 @@ def train_single_model(
                 if log_file:
                     with open(log_file, 'a') as f:
                         f.write(json.dumps(log_entry) + '\n')
+
+                # Store latest eval losses
+                eval_losses = {mode: results[mode]['loss'] for mode in eval_modes}
 
 def evaluate_single_model(model, eval_loader, global_step, mode):
     """Evaluate model on a specific evaluation mode"""
@@ -253,7 +287,6 @@ def evaluate_single_model(model, eval_loader, global_step, mode):
             all_params = torch.cat([p.flatten() for p in model.parameters()])
             results_dict['parameter_l2'] = torch.norm(all_params).item() / np.sqrt(all_params.numel())
             
-            pbar.set_postfix({'eval_questions': eval_questions})
             if eval_questions >= 1000:
                 break
     
@@ -349,7 +382,7 @@ def get_columns_all_equal(dataset: Union[Dataset, DatasetDict]) -> list[str]:
 
     return dataset.column_names
 
-def create_or_load_optimizer(model, args, checkpoint_path=None):
+def     create_or_load_optimizer(model, args, checkpoint_path=None):
     """Create a new optimizer or load from checkpoint."""
     if args.optimizer_type == "schedulefree":
         optimizer = AdamWScheduleFree(
@@ -381,6 +414,7 @@ def create_or_load_optimizer(model, args, checkpoint_path=None):
             )
     
     start_step = 0
+    heldout_sets = None
     if checkpoint_path:
         optimizer_path = f"{checkpoint_path}/optimizer.pt"
         if os.path.exists(optimizer_path):

@@ -38,20 +38,11 @@ def main(args):
         print(f"Loading model from checkpoint: {latest_checkpoint}")
         model = LlamaForCausalLM.from_pretrained(latest_checkpoint)
 
-    train_dataset, onehop_dataset, twohop_dataset = load_and_prepare_datasets(
-        tokenizer, args.N, orders=args.orders, relations=args.relations, hop_ratio=args.hop_ratio
-    )
-
-    if args.curriculum:
-        # Start with only 1-hop questions
-        train_dataset.order_weights = [1.0, 0.0]
-        print("Starting curriculum learning with 1-hop only")
-
     model_size_mb = calculate_model_size(real_num_params)
     print(f"Estimated model size: {model_size_mb} MB")
     print(f"Epochs: {args.num_epochs}")
 
-    train_single_model(model, train_dataset, args, output_dir, args.curriculum)
+    train_single_model(model, tokenizer, args, output_dir, args.curriculum)
 
     if args.push_to_hub:
         hub_id = f"EleutherAI/llama_multihop_n{args.N}_p{real_num_params}_omin{min(args.orders)}_omax{max(args.orders)}_wd{args.wd}_l{args.num_layers}_lr{args.lr}_beta1{args.beta1}_{sf_str}{rel_str}{hop_str}{curr_str}"

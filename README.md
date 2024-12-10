@@ -14,6 +14,14 @@ pip install -e .
 
 (this probably isn't sufficient right now - please let me know what issues you have and I'll try to fix them)
 
+
+To generate profiles, you also need to clone NamesDatabases into the `generated_data` folder:
+```bash
+cd generated_data
+git clone https://github.com/smashew/NameDatabases.git
+```
+
+
 ## Running experiments
 
 ### Generating datasets
