@@ -43,7 +43,7 @@ def load_and_prepare_datasets(tokenizer, N=250000, orders=None, relations=None, 
 
 class InfiniteQADataset(IterableDataset):
     def __init__(self, profiles_dataset, tokenizer, max_seq_len=512, orders=[1,2], subjects=None, 
-                 hop_ratio=0.1, heldout_fraction=0.02, mode="train", heldout_sets=None):
+                 hop_ratio=0.1, heldout_fraction=0.05, mode="train", heldout_sets=None):
         self.profiles = profiles_dataset
         self.tokenizer = tokenizer
         self.max_seq_len = max_seq_len
@@ -60,6 +60,7 @@ class InfiniteQADataset(IterableDataset):
         self.subjects = subjects
         self._batch_size = None  # Will be set during iteration
         self.mode = mode
+        self._epoch = 0
         
         # Either use provided held-out sets or generate new ones
         if heldout_sets is not None:
@@ -118,7 +119,10 @@ class InfiniteQADataset(IterableDataset):
             world_size = 1
 
         # Set random seed based on both DDP rank and DataLoader worker_id for proper sharding
-        random.seed(rank * 10000 + self.worker_id)
+        # Add epoch counter to ensure different data each epoch
+        epoch = getattr(self, '_epoch', 0) 
+        random.seed(rank * 10000 + self.worker_id + epoch * 1000000)
+        self._epoch = epoch + 1
         
         # Calculate samples for this worker based on dataset length
         total_samples = len(self)  # This now accounts for world_size
