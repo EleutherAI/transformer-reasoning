@@ -142,6 +142,9 @@ def train_single_model(
 
     # Training loop
     for epoch in range(args.num_epochs):
+        # Set epoch for dataset
+        train_dataset.set_epoch(epoch)
+        
         model.train()
         if hasattr(optimizer, 'train'):
             optimizer.train()
