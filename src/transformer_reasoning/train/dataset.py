@@ -20,7 +20,16 @@ from transformer_reasoning.generate_dataset.generate_qa_dataset import maybe_gen
 from transformer_reasoning.utils import get_project_root
 
 
-def load_and_prepare_datasets(tokenizer, N=250000, orders=None, relations=None, hop_ratio=0.1, jax=False, heldout_sets=None):
+def load_and_prepare_datasets(
+        tokenizer, 
+        N=250000, 
+        orders=None, 
+        relations=None, 
+        hop_ratio=0.1, 
+        jax=False, 
+        heldout_sets=None, 
+        debug=False
+    ):
 
     dataset_class = JAXQADataset if jax else InfiniteQADataset
 
@@ -35,7 +44,8 @@ def load_and_prepare_datasets(tokenizer, N=250000, orders=None, relations=None, 
         orders=orders or [1,2],
         hop_ratio=hop_ratio,
         heldout_fraction=0.05,
-        heldout_sets=heldout_sets
+        heldout_sets=heldout_sets,
+        debug=debug
     )
     
     return train_dataset
@@ -43,7 +53,8 @@ def load_and_prepare_datasets(tokenizer, N=250000, orders=None, relations=None, 
 
 class InfiniteQADataset(IterableDataset):
     def __init__(self, profiles_dataset, tokenizer, max_seq_len=512, orders=[1,2], subjects=None, 
-                 hop_ratio=0.1, heldout_fraction=0.05, mode="train", heldout_sets=None, seed_offset=0):
+                 hop_ratio=0.1, heldout_fraction=0.05, mode="train", heldout_sets=None, seed_offset=0,
+                 debug=False):
         self.profiles = profiles_dataset
         self.tokenizer = tokenizer
         self.max_seq_len = max_seq_len
@@ -62,7 +73,7 @@ class InfiniteQADataset(IterableDataset):
         self.mode = mode
         self._epoch = 0
         self._seed_offset = seed_offset
-
+        self.debug = debug
         # Either use provided held-out sets or generate new ones
         if heldout_sets is not None:
             self.heldout_sets = heldout_sets
@@ -74,24 +85,38 @@ class InfiniteQADataset(IterableDataset):
         self._epoch = epoch
 
     def _generate_all_heldout_sets(self, fraction):
-        n_profiles = len(self.profiles)
-        n_relations = len(RELATIONS)
-        n_attributes = len(ATTRIBUTES)
-        
-        self.heldout_sets = {
-            "first_people": set(random.sample(range(n_profiles), max(1, int(n_profiles * fraction)))),
-            "relations": set(random.sample(RELATIONS, max(1, int(n_relations * fraction)))),
-            "person_relation_pairs": set(
-                random.sample([(p, r) for p in range(n_profiles) for r in RELATIONS], 
-                            max(1, int(n_profiles * n_relations * fraction)))
-            ),
-            "second_people": set(random.sample(range(n_profiles), max(1, int(n_profiles * fraction)))),
-            "second_attributes": set(random.sample(ATTRIBUTES + RELATIONS, max(1, int(n_attributes * fraction)))),
-            "second_person_attribute_pairs": set(
-                random.sample([(p, a) for p in range(n_profiles) for a in ATTRIBUTES + RELATIONS],
-                            max(1, int(n_profiles * n_attributes * fraction)))
-            )
-        }
+        if not dist.is_initialized() or dist.get_rank() == 0:
+            n_profiles = len(self.profiles)
+            n_relations = len(RELATIONS) 
+            n_attributes = len(ATTRIBUTES)
+
+            self.heldout_sets = {
+                "first_people": sorted(random.sample(range(n_profiles), max(1, int(n_profiles * fraction)))),
+                "relations": sorted(random.sample(RELATIONS, max(1, int(n_relations * fraction)))),
+                "person_relation_pairs": sorted(
+                    random.sample([(p, r) for p in range(n_profiles) for r in RELATIONS], 
+                                max(1, int(n_profiles * n_relations * fraction)))
+                ),
+                "second_people": sorted(random.sample(range(n_profiles), max(1, int(n_profiles * fraction)))),
+                "second_attributes": sorted(random.sample(ATTRIBUTES + RELATIONS, max(1, int(n_attributes * fraction)))),
+                "second_person_attribute_pairs": sorted(
+                    random.sample([(p, a) for p in range(n_profiles) for a in ATTRIBUTES + RELATIONS],
+                                max(1, int(n_profiles * n_attributes * fraction)))
+                ),
+                "complete_two_hop_questions": sorted(
+                    random.sample([(p, r, a) for p in range(n_profiles) for r in RELATIONS for a in ATTRIBUTES],
+                                max(1, int(n_profiles * n_relations * n_attributes * fraction)))
+                )
+            }
+
+        if dist.is_initialized():
+            if dist.get_rank() != 0:
+                heldout_sets_list = [{}]
+            else:
+                heldout_sets_list = [self.heldout_sets]
+            
+            dist.broadcast_object_list(heldout_sets_list, src=0)
+            self.heldout_sets = heldout_sets_list[0]
 
     def __len__(self):
         # Get DDP info
@@ -118,17 +143,37 @@ class InfiniteQADataset(IterableDataset):
         # Get DDP info
         if dist.is_initialized():
             rank = dist.get_rank()
-            world_size = dist.get_world_size()
         else:
             rank = 0
-            world_size = 1
 
         # Print epoch, rank and worker info
         if self.worker_id == 0 and (not dist.is_initialized() or dist.get_rank() == 0):
             print(f"Dataset iterator called with epoch {self._epoch}")
         
+        
+        # Convert lists to sets for fast lookup during iteration
+        if self.debug:
+            print(f"IN ITER Rank {dist.get_rank()}:")
+            pairs = self.heldout_sets['second_person_attribute_pairs']
+            print(f"Length: {len(pairs)}")
+            print(f"First 3: {pairs[:3]}")
+            print(f"Last 3: {pairs[-3:]}")
+            print(f"Types: {[type(p) for p in pairs[0]]}")
+            print(f"Hash: {hash(tuple(pairs))}")
+            heldout_sets = self.heldout_sets
+            print(f"heldout sets hash: {hash(tuple((k, tuple(v)) for k, v in heldout_sets.items()))}")
+            print(f"first people hash: {hash(tuple(heldout_sets['first_people']))}")
+            print(f"second person attribute pairs hash: {hash(tuple(heldout_sets['second_person_attribute_pairs']))}")
+            print(f"length of 2pap: {len(self.heldout_sets['second_person_attribute_pairs'])}")
+        else:
+            heldout_sets = {k: frozenset(v) for k, v in self.heldout_sets.items()}
+
         # Set random seed based on epoch, rank, worker_id, and a random offset
-        random.seed(self._seed_offset + rank * 10000 + self.worker_id * 100 + self._epoch)
+        seed = self._seed_offset + rank + self.worker_id + self._epoch
+        torch.manual_seed(seed)
+        random.seed(seed)
+        print(f"Rank: {rank}, Worker ID: {self.worker_id}, Epoch: {self._epoch}, Seed offset: {self._seed_offset}, Seed: {seed}")
+
         
         # Calculate samples for this worker based on dataset length
         total_samples = len(self)  # This now accounts for world_size
@@ -138,7 +183,7 @@ class InfiniteQADataset(IterableDataset):
         while samples_processed < worker_samples:
             texts = []
             for _ in range(self.samples_per_yield):
-                question = self.generate_qa()
+                question = self.generate_qa(heldout_sets)
                 texts.append(question)
 
             # If no tokenizer provided, just return the text chunk
@@ -168,9 +213,15 @@ class InfiniteQADataset(IterableDataset):
 
             samples_processed += 1
 
-    def generate_qa(self):
+    def generate_qa(self, heldout_sets):
         while True:
-            profile_idx = random.choice(self.qa_indices)
+            relation, attribute = None, None
+            if self.mode == "eval_first_people":
+                profile_idx = random.choice(self.heldout_sets["first_people"])
+            elif self.mode == "eval_complete_two_hop_questions":
+                profile_idx, relation, attribute = random.choice(self.heldout_sets["complete_two_hop_questions"])
+            else:
+                profile_idx = random.choice(self.qa_indices)
             profile = self.profiles[profile_idx]
             
             # Training uses both 1-hop and 2-hop, eval uses only 2-hop
@@ -181,7 +232,9 @@ class InfiniteQADataset(IterableDataset):
                 profiles=self.profiles, 
                 order=order,
                 mode=self.mode,
-                heldout_sets=self.heldout_sets
+                heldout_sets=heldout_sets,
+                relation=relation,
+                subject=attribute
             )
             
             if question:

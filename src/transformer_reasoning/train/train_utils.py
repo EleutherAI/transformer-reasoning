@@ -36,14 +36,17 @@ def train_single_model(
         tokenizer,
         args,
         output_dir=None,
-        curriculum=False
+        curriculum=False,
+        n_steps=None,
+        debug=False
         ):
     early_saves = set([int(math.exp(i)) for i in torch.linspace(math.log(100), math.log(100000), 10).tolist()])
     
     # Get rank for distributed training
     is_main_process = True
     if torch.cuda.device_count() > 1 and 'WORLD_SIZE' in os.environ:
-        dist.init_process_group(backend='nccl')
+        if not dist.is_initialized():
+            dist.init_process_group(backend='nccl')
         local_rank = dist.get_rank()
         print(f"Local rank: {local_rank}")
         is_main_process = local_rank == 0
@@ -55,6 +58,7 @@ def train_single_model(
     model = model.to(device)
     if dist.is_initialized():
         model = DDP(model, device_ids=[local_rank])
+        dist.barrier()
     
     # Create or load optimizer
     start_step = 0
@@ -62,7 +66,10 @@ def train_single_model(
     if args.resume_from_checkpoint and output_dir:
         checkpoints = glob.glob(os.path.join(output_dir, "checkpoint-*"))
         if checkpoints:
-            latest_checkpoint = sorted(checkpoints, key=lambda x: int(x.split("-")[-1]))[-1]
+            if args.checkpoint_number:
+                latest_checkpoint = [c for c in checkpoints if f"checkpoint-{args.checkpoint_number}" in c][0]
+            else:
+                latest_checkpoint = sorted(checkpoints, key=lambda x: int(x.split("-")[-1]))[-1]
     optimizer, scheduler, start_step, heldout_sets = create_or_load_optimizer(model, args, latest_checkpoint)
     
     train_dataset = load_and_prepare_datasets(
@@ -71,7 +78,8 @@ def train_single_model(
         orders=args.orders, 
         relations=args.relations, 
         hop_ratio=args.hop_ratio, 
-        heldout_sets=heldout_sets
+        heldout_sets=heldout_sets,
+        debug=debug
     )
 
     if args.curriculum:
@@ -88,21 +96,23 @@ def train_single_model(
     train_loader = DataLoader(
         train_dataset,
         batch_size=args.train_batch_size,
-        num_workers=args.num_workers,
+        num_workers=args.num_workers if not debug else 0,
         pin_memory=True
     )
-    
     # Create evaluation datasets using the same held-out sets as train_dataset
-    eval_modes = [
-        "train_onehop",
-        "train_twohop",
-        "eval_first_people",
-        "eval_relations",
-        "eval_person_relation_pairs",
-        "eval_second_people",
-        "eval_second_attributes",
-        "eval_second_person_attribute_pairs"
-    ]
+    if not debug:
+        eval_modes = [
+            "train_onehop",
+            "train_twohop",
+            "eval_first_people",
+            "eval_relations",
+            "eval_person_relation_pairs",
+            "eval_second_people",
+            "eval_second_attributes",
+            "eval_second_person_attribute_pairs"
+        ]
+    else:
+        eval_modes = []
     
     eval_datasets = {
         mode: InfiniteQADataset(
@@ -141,6 +151,7 @@ def train_single_model(
         pbar = train_loader
 
     # Training loop
+    last_batch = None
     for epoch in range(args.num_epochs):
         # Set epoch for dataset
         train_dataset.set_epoch(epoch)
@@ -150,6 +161,7 @@ def train_single_model(
             optimizer.train()
 
         for i, batch in enumerate(pbar):
+            last_batch = batch
             batch = {k: v.to(model.device) if hasattr(v, 'to') else v 
                     for k, v in batch.items()}
             del batch['text']
@@ -178,63 +190,73 @@ def train_single_model(
             if is_main_process:
                 pbar.set_postfix(postfix)
 
-            if should_save and is_main_process:
-                log_entry = {
-                    'step': global_step,
-                    'epoch': epoch,
-                    'timestamp': datetime.now().isoformat()
-                }
-
-                # Evaluation mode
-                model.eval()
-                if hasattr(optimizer, 'eval'):
-                    optimizer.eval()
+            if should_save:
+                # Synchronize all processes before evaluation
+                if dist.is_initialized():
+                    dist.barrier()
                 
-                # Evaluate on all modes
-                results = {}
-                for mode, loader in eval_loaders.items():
-                    results[mode] = evaluate_single_model(model, loader, global_step, mode)
-                    results_dicts.append(results[mode])
-                    
-                    # Add to log entry
-                    log_entry[f'{mode}_loss'] = results[mode]['loss']
-                    
-                # Update progress bar
                 if is_main_process:
-                    pbar.set_postfix({
-                        **{f'{mode}_loss': results[mode]['loss'] for mode in eval_modes},
+                    log_entry = {
                         'step': global_step,
-                        "train_loss": loss.item()
-                    })
-
-                # Save checkpoint
-                if output_dir:
-                    model_path = f"{output_dir}/checkpoint-{global_step}"
-                    if isinstance(model, DDP):
-                        model.module.save_pretrained(model_path)
-                    else:
-                        model.save_pretrained(model_path)
-                    
-                    # Save optimizer and scheduler state
-                    optimizer_state = {
-                        'optimizer_state_dict': optimizer.state_dict(),
-                        'step': global_step,
-                        'heldout_sets': train_dataset.heldout_sets,  # Add holdout sets
-                        **{f'{mode}_loss': results_dicts[-len(eval_modes) + i]['loss'] 
-                        for i, mode in enumerate(eval_modes)},
-                        'train_loss': loss.item()
+                        'epoch': epoch,
+                        'timestamp': datetime.now().isoformat()
                     }
-                    if scheduler:
-                        optimizer_state['scheduler_state_dict'] = scheduler.state_dict()
-                    torch.save(optimizer_state, f"{model_path}/optimizer.pt")
+
+                    # Evaluation mode
+                    model.eval()
+                    if hasattr(optimizer, 'eval'):
+                        optimizer.eval()
+                    
+                    # Evaluate and save only on main process
+                    results = {}
+                    for mode, loader in eval_loaders.items():
+                        results[mode] = evaluate_single_model(model, loader, global_step, mode)
+                        results_dicts.append(results[mode])
+                        
+                        # Add to log entry
+                        log_entry[f'{mode}_loss'] = results[mode]['loss']
+                        
+                    # Update progress bar
+                    if is_main_process:
+                        pbar.set_postfix({
+                            **{f'{mode}_loss': results[mode]['loss'] for mode in eval_modes},
+                            'step': global_step,
+                            "train_loss": loss.item()
+                        })
+
+                    # Save checkpoint
+                    if output_dir:
+                        model_path = f"{output_dir}/checkpoint-{global_step}"
+                        if isinstance(model, DDP):
+                            model.module.save_pretrained(model_path)
+                        else:
+                            model.save_pretrained(model_path)
+                        
+                        # Save optimizer and scheduler state
+                        optimizer_state = {
+                            'optimizer_state_dict': optimizer.state_dict(),
+                            'step': global_step,
+                            'heldout_sets': train_dataset.heldout_sets,  # Add holdout sets
+                            **{f'{mode}_loss': results_dicts[-len(eval_modes) + i]['loss'] 
+                            for i, mode in enumerate(eval_modes)},
+                            'train_loss': loss.item()
+                        }
+                        if scheduler:
+                            optimizer_state['scheduler_state_dict'] = scheduler.state_dict()
+                        torch.save(optimizer_state, f"{model_path}/optimizer.pt")
+                    
+                    if not debug:
+                        results_df = pd.DataFrame(results_dicts)
+                        # Save results
+                        if os.path.exists(f"{output_dir}/eval_results.csv"):
+                            results_df = results_df[results_df['global_step'] == global_step]
+                            results_df.to_csv(f"{output_dir}/eval_results.csv", mode='a', header=False, index=False)
+                        else:
+                            results_df.to_csv(f"{output_dir}/eval_results.csv", index=False)
                 
-                    results_df = pd.DataFrame(results_dicts)
-                    # Save results
-                    if os.path.exists(f"{output_dir}/eval_results.csv"):
-                        results_df = results_df[results_df['global_step'] == global_step]
-                        results_df.to_csv(f"{output_dir}/eval_results.csv", mode='a', header=False, index=False)
-                    else:
-                        results_df.to_csv(f"{output_dir}/eval_results.csv", index=False)
+                # Synchronize again before resuming training
+                if dist.is_initialized():
+                    dist.barrier()
                 
                 # Back to training mode
                 model.train()
@@ -257,6 +279,12 @@ def train_single_model(
 
                 # Store latest eval losses
                 eval_losses = {mode: results[mode]['loss'] for mode in eval_modes}
+
+            if n_steps and global_step >= n_steps:
+                    break
+
+    if debug:
+        return optimizer, last_batch
 
 def evaluate_single_model(model, eval_loader, global_step, mode):
     """Evaluate model on a specific evaluation mode"""
@@ -385,7 +413,7 @@ def get_columns_all_equal(dataset: Union[Dataset, DatasetDict]) -> list[str]:
 
     return dataset.column_names
 
-def     create_or_load_optimizer(model, args, checkpoint_path=None):
+def create_or_load_optimizer(model, args, checkpoint_path=None):
     """Create a new optimizer or load from checkpoint."""
     if args.optimizer_type == "schedulefree":
         optimizer = AdamWScheduleFree(
@@ -426,7 +454,7 @@ def     create_or_load_optimizer(model, args, checkpoint_path=None):
             if scheduler and 'scheduler_state_dict' in optimizer_state:
                 scheduler.load_state_dict(optimizer_state['scheduler_state_dict'])
             start_step = optimizer_state['step']
-            heldout_sets = optimizer_state.get('heldout_sets')  # Get holdout sets if they exist
+            heldout_sets = optimizer_state.get('heldout_sets')
             print(f"Loaded optimizer state from step {start_step}")
     
     return optimizer, scheduler, start_step, heldout_sets   

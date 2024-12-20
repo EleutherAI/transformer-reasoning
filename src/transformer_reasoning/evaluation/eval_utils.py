@@ -1,9 +1,10 @@
 import pandas as pd
 import glob
 import re
-from torch.nn import CrossEntropyLoss
-from pathlib import Path
 from transformer_reasoning.utils import get_project_root
+from pathlib import Path
+from torch.nn import CrossEntropyLoss
+from datasets import load_dataset
 import torch
 from tqdm import tqdm
 import numpy as np
@@ -18,19 +19,24 @@ def tokenwise_loss(inputs, logits):
 
 
 def get_checkpoints(min_order, max_order, N, num_parameters, wd, relations=None, hop_ratio=None, layers=4):
-    relations_str = f'_r{relations}' if relations is not None else ''
-    hop_ratio_str = f'_hr{hop_ratio}' if hop_ratio is not None else ''
+    relations_str = f'_r{relations.lstrip("_r")}' if relations is not None else ''
+    hop_ratio_str = f'_hr{hop_ratio.lstrip("_hr")}' if hop_ratio is not None else ''
     file_pattern = f'./results/n{N}_p{num_parameters}_omin{min_order}_omax{max_order}_wd{wd}_l{layers}_lr0.001_beta10.99_sf{relations_str}{hop_ratio_str}/*'
     files = glob.glob(file_pattern)
     return files
 
 
-def load_eval_results():
-    files = glob.glob('./results/n*_p*_omin1_omax*_wd0.1_l*_lr0.001_beta10.99_sf*/eval_results.csv')
-
+def load_eval_results(skip_mode=True):
+    files = glob.glob('./results/n*_p*_omin1_omax*_wd0.1_l*_lr0.001_beta10.99_sf*/eval_results.csv') + \
+            glob.glob('./results/n*_p*_omin1_omax*_wd0.1_l*_lr0.001_beta10.99_sf*/eval_results_old.csv')
+    
     dfs = []
     for f in files:
         df = pd.read_csv(f)
+        if 'mode' in df.columns and skip_mode:
+            continue
+        if 'curr' in f:
+            continue
         
         # Extract parameters from path
         params = re.search(r'n(\d+)_p(\d+)_omin(\d+)_omax(\d+)_wd([\d\.]+)_l(\d+)_lr([\d\.]+)_beta1([\d\.]+)_(sf|adamw|adamw-linear)(_r\d+)?(_hr\d+)?', f)
@@ -47,7 +53,11 @@ def load_eval_results():
         hop_ratio = int(params.group(11).lstrip('_hr')) if params.group(11) else np.nan
         
         # Add columns
-        df['hops'] = [1,2] * (len(df)//2)
+        if 'mode' not in df.columns:
+            df['hops'] = [1,2] * (len(df)//2)
+            df['mode'] = df['hops'].apply(lambda x: 'train_onehop' if x == 1 else 'train_twohop')
+        else:
+            df['hops'] = df['mode'].apply(lambda x: 1 if x == 'train_onehop' else 2 if x == 'train_twohop' else np.nan)
         df['lr'] = lr
         df['layers'] = layers
         df['weight_decay'] = weight_decay
@@ -59,7 +69,12 @@ def load_eval_results():
         df['n_params'] = n_params
         df['min_train_hops'] = min_train_hops
         df['max_train_hops'] = max_train_hops
+        df['currency'] = 'current'
+        if 'old' in f:
+            df['currency'] = 'old'
 
+        df = df[~df['mode'].astype(str).str.match(r'^\d*\.?\d*$')]
+        
         dfs.append(df)
 
     df = pd.concat(dfs)
@@ -120,3 +135,56 @@ def evaluate_model_histograms(model, onehop_loader, twohop_loader):
                     break
     
     return onehop_losses, twohop_losses
+
+def get_sizes_and_entropies():
+    from transformer_reasoning.evaluation.measure_capacity import dataset_entropy
+    files = glob.glob('./results/n*_p*_omin1_omax*_wd0.1_l*_lr0.001_beta10.99_sf*/eval_results.csv') + \
+        glob.glob('./results/n*_p*_omin1_omax*_wd0.1_l*_lr0.001_beta10.99_sf*/eval_results_old.csv')
+
+    model_sizes_and_entropies = []
+
+    for f in files:
+        df = pd.read_csv(f)
+        
+        # Extract parameters from path
+        params = re.search(r'n(\d+)_p(\d+)_omin(\d+)_omax(\d+)_wd([\d\.]+)_l(\d+)_lr([\d\.]+)_beta1([\d\.]+)_(sf|adamw|adamw-linear)(_r\d+)?(_hr\d+)?', f)
+        n_profiles = int(params.group(1))
+        n_params = int(params.group(2))
+        layers = int(params.group(6))
+        relations = int(params.group(10).lstrip('_r')) if params.group(10) else None
+
+        rel_str = f"_r{relations}" if relations is not None else ""
+
+        profiles_dataset = load_dataset(f"EleutherAI/profiles_dataset_{n_profiles}_uniform{rel_str}")['train']        
+
+        dataset_entropy_optimal_1hop, dataset_entropy_optimal_2hop = dataset_entropy(
+            profiles_dataset, 
+            n_profiles, 
+            scheme='optimal',
+            selection_scheme='enumerate'
+        )
+
+        dataset_entropy_big_hash_1hop, dataset_entropy_big_hash_2hop = dataset_entropy(
+            profiles_dataset, 
+            n_profiles, 
+            scheme='2-hop-big-hash',
+            selection_scheme='enumerate'
+        )
+
+        model_sizes_and_entropies.append({
+            'n_profiles': n_profiles,
+            'n_params': n_params,
+            'layers': layers,
+            'relations': relations,
+            'entropy_1hop': dataset_entropy_optimal_1hop['total_capacity'],
+            'entropy_optimal_2hop': dataset_entropy_optimal_2hop['total_capacity'],
+            'entropy_big_hash_2hop': dataset_entropy_big_hash_2hop['total_capacity'],
+            'total_entropy_optimal': dataset_entropy_optimal_1hop['total_capacity'] + dataset_entropy_optimal_2hop['total_capacity'],
+            'total_entropy_big_hash': dataset_entropy_big_hash_1hop['total_capacity'] + dataset_entropy_big_hash_2hop['total_capacity']
+        })
+
+
+    outfile = Path(get_project_root()) / 'model_sizes_and_entropies.csv'
+    df = pd.DataFrame(model_sizes_and_entropies)
+    df.to_csv(outfile, index=False)
+    return df

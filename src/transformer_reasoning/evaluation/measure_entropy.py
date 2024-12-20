@@ -8,44 +8,54 @@ import argparse
 from datetime import datetime
 import numpy as np
 from math import ceil
+from typing import Literal
 
 
-def calculate_entropy(values, attr, bipartite: bool = False, selection: bool = False, scheme: str = 'optimal'):
+def calculate_selection_entropy(
+        values: list[str], 
+        attr: str, 
+        selection_scheme: Literal['optimal', 'enumerate', 'independent'] = 'enumerate',
+        N: int = None
+    ):
+    
+    if attr == 'name':
+        first_names = set(value.split()[0] for value in values)
+        middle_names = set(value.split()[1] for value in values)
+        last_names = set(value.split()[2] for value in values)
+        N_names = len(first_names)*len(middle_names)*len(last_names)
+        n_names = N if N is not None else len(values)
+        if selection_scheme == 'optimal':
+            name_selection_entropy = n_names * np.log2(N_names) - n_names * np.log2(n_names)
+        elif selection_scheme == 'enumerate':
+            name_selection_entropy = n_names * np.log2(N_names)
+        elif selection_scheme == 'independent':
+            name_selection_entropy = 0
+        return name_selection_entropy
+    elif attr == 'birth_date':
+        start_date = datetime(1900, 1, 1)
+        end_date = datetime(2099, 12, 31)
+        time_between_dates = end_date - start_date
+        days_between_dates = time_between_dates.days
+        if selection_scheme == 'optimal':
+            birth_date_selection_entropy = len(values) * np.log2(days_between_dates) - len(values) * np.log2(len(values))
+        elif selection_scheme == 'enumerate':
+            birth_date_selection_entropy = len(values) * np.log2(days_between_dates)
+        elif selection_scheme == 'independent':
+            birth_date_selection_entropy = 0
+        return birth_date_selection_entropy
+
+def calculate_entropy(
+        values: list[str], 
+        attr: str, 
+        bipartite: bool = False, 
+        scheme: Literal['optimal', '2-hop-big-hash', 'independent'] = 'optimal'
+    ):
     # Calculate unique values for each component
     # scheme: 'optimal': use optimal encoding for names/birth_dates,
     #         'enumerate': enumerate all name/birth_date values, neglecting symmetries,
     #         'independent': each name/birth_date occurrence is treated as a random selection from the set of all possible values, neglecting re-use
     if bipartite:
         raise NotImplementedError("Bipartite relationships not implemented yet")
-    
-    if selection:
-        if attr == 'name':
-            first_names = set(value.split()[0] for value in values)
-            middle_names = set(value.split()[1] for value in values)
-            last_names = set(value.split()[2] for value in values)
-            N_names = len(first_names)*len(middle_names)*len(last_names)
-            n_names = len(values)
-            if scheme in ['optimal', '2-hop-big-hash']:
-                name_selection_entropy = n_names * np.log2(N_names) - n_names * np.log2(n_names)
-            elif scheme == 'enumerate':
-                name_selection_entropy = n_names * np.log2(N_names)
-            elif scheme == 'independent':
-                name_selection_entropy = 0
-            return name_selection_entropy
-    
-        elif attr == 'birth_date':
-            start_date = datetime(1900, 1, 1)
-            end_date = datetime(2099, 12, 31)
-            time_between_dates = end_date - start_date
-            days_between_dates = time_between_dates.days
-
-            if scheme in ['optimal', '2-hop-big-hash']:
-                birth_date_selection_entropy = len(values) * np.log2(days_between_dates) - len(values) * np.log2(len(values))
-            elif scheme == 'enumerate':
-                birth_date_selection_entropy = len(values) * np.log2(days_between_dates)
-            elif scheme == 'independent':
-                birth_date_selection_entropy = 0
-            return birth_date_selection_entropy
     
     if scheme == "independent":
         if attr in RELATIONSHIP_TYPES:

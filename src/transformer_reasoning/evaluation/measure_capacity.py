@@ -9,14 +9,23 @@ import matplotlib.pyplot as plt
 from datasets import load_dataset
 
 from transformer_reasoning.utils import get_project_root
-from transformer_reasoning.evaluation.measure_entropy import calculate_entropy
+from transformer_reasoning.evaluation.measure_entropy import calculate_entropy, calculate_selection_entropy
 from transformer_reasoning.evaluation.eval_utils import load_eval_results
-from transformer_reasoning.evaluation.plot_functions import cap_vs_N_plot
+from transformer_reasoning.evaluation.plot_capacity import cap_vs_N_plot
 from transformer_reasoning.generate_dataset.generate_profiles import RELATIONSHIP_TYPES
 
 import seaborn as sns
 
-def calculate_capacities_average(total_losses, entropies, name_selection_entropy, birth_date_selection_entropy, N, hops, scheme, incremental=False):
+def calculate_capacities_average(
+        total_losses, 
+        entropies, 
+        name_selection_entropy, 
+        birth_date_selection_entropy, 
+        N, 
+        hops, 
+        scheme, 
+        incremental=False
+    ):
     """Calculate average capacities for all attributes."""
     num_relations = len([r for r in RELATIONSHIP_TYPES if r in entropies])
     qa_multiplier = 1
@@ -32,16 +41,29 @@ def calculate_capacities_average(total_losses, entropies, name_selection_entropy
     avg_loss = total_losses['all_questions'] 
     
     if total_entropy > avg_loss * len(entropies):
-        capacity = (total_entropy - avg_loss * len(entropies)) * qa_multiplier * N + name_selection_entropy + birth_date_selection_entropy
+        capacity = (total_entropy - avg_loss * len(entropies)) * \
+            qa_multiplier * N + \
+            name_selection_entropy + \
+            birth_date_selection_entropy
     elif not incremental:
         excess_loss = avg_loss * len(entropies) - total_entropy
-        capacity = name_selection_entropy + birth_date_selection_entropy - excess_loss * N
+        capacity = name_selection_entropy + birth_date_selection_entropy - \
+            excess_loss * N
     else:
         capacity = 0
 
     return {'total_capacity': capacity}
 
-def calculate_capacities_per_attr(per_attribute_losses, entropies, name_selection_entropy, birth_date_selection_entropy, N, hops, scheme, incremental=False):
+def calculate_capacities_per_attr(
+        per_attribute_losses, 
+        entropies, 
+        name_selection_entropy, 
+        birth_date_selection_entropy, 
+        N, 
+        hops, 
+        scheme, 
+        incremental=False
+    ):
     """Calculate per-attribute and 2nd order QA capacities."""
     # Collect attribute values for entropy calculation    
     num_relations = len([r for r in RELATIONSHIP_TYPES if r in entropies])
@@ -60,7 +82,8 @@ def calculate_capacities_per_attr(per_attribute_losses, entropies, name_selectio
         qa_loss = per_attribute_losses[attr]
         if attr in RELATIONSHIP_TYPES:
             if entropy > qa_loss:
-                qa_capacity[label] = (entropy - qa_loss) * qa_multiplier * N + name_selection_entropy/num_relations
+                qa_capacity[label] = (entropy - qa_loss) * qa_multiplier * \
+                    N + name_selection_entropy/num_relations
             elif not incremental:
                 excess_loss = qa_loss - entropy
                 qa_capacity[label] = (name_selection_entropy - excess_loss * N)/num_relations
@@ -68,10 +91,12 @@ def calculate_capacities_per_attr(per_attribute_losses, entropies, name_selectio
                 qa_capacity[label] = 0
         elif attr == 'birth_date':
             if entropy > qa_loss:
-                qa_capacity[label] = (entropy - qa_loss) * qa_multiplier * N + birth_date_selection_entropy
+                qa_capacity[label] = (entropy - qa_loss) * qa_multiplier * \
+                    N + birth_date_selection_entropy
             elif not incremental:
                 excess_loss = qa_loss - entropy
-                qa_capacity[label] = birth_date_selection_entropy - excess_loss * N
+                qa_capacity[label] = birth_date_selection_entropy - \
+                    excess_loss * N
             else:
                 qa_capacity[label] = 0
         else:
@@ -81,14 +106,48 @@ def calculate_capacities_per_attr(per_attribute_losses, entropies, name_selectio
 
     return qa_capacity
 
-def calculate_capacities(losses, entropies, name_selection_entropy, birth_date_selection_entropy, N, hops, scheme, incremental=False):
+def calculate_capacities(
+        losses, 
+        entropies, 
+        name_selection_entropy, 
+        birth_date_selection_entropy, 
+        N, 
+        hops, 
+        scheme, 
+        incremental=False
+    ):
     if set(entropies.keys()).issubset(set(losses.keys())):
-        return calculate_capacities_per_attr(losses, entropies, name_selection_entropy, birth_date_selection_entropy, N, hops, scheme, incremental)
+        return calculate_capacities_per_attr(
+            losses, 
+            entropies, 
+            name_selection_entropy, 
+            birth_date_selection_entropy, 
+            N, 
+            hops, 
+            scheme, 
+            incremental
+        )
     else:
-        return calculate_capacities_average(losses, entropies, name_selection_entropy, birth_date_selection_entropy, N, hops, scheme)
+        return calculate_capacities_average(
+            losses, 
+            entropies, 
+            name_selection_entropy, 
+            birth_date_selection_entropy, 
+            N, 
+            hops, 
+            scheme
+        )
 
 
-def process_timestep_data(eval_results, N, entropies, name_selection_entropy, birth_date_selection_entropy, scheme):
+def process_timestep_data(
+        eval_results, 
+        N, 
+        entropies, 
+        name_selection_entropy, 
+        birth_date_selection_entropy, 
+        scheme,
+        dataset_entropy
+    ):
     """Calculate capacities for each timestep in the loss data."""
     results = []
     filtered_eval_results = eval_results[eval_results['N_profiles'] == N]
@@ -187,6 +246,84 @@ def process_timestep_data(eval_results, N, entropies, name_selection_entropy, bi
 
     return pd.DataFrame(results)
 
+def dataset_component_entropies(
+        test_profiles_dataset, 
+        N=None, 
+        scheme="optimal",
+        selection_scheme="optimal"
+    ):
+    if N is None:
+        N = len(test_profiles_dataset)
+
+
+    relations = [r for r in RELATIONSHIP_TYPES if r in test_profiles_dataset.features]
+    attribute_values = {
+        'name': list(set(test_profiles_dataset['name'])),
+        'birth_date': list(set(test_profiles_dataset['birth_date'])),
+        'birth_city': list(set(test_profiles_dataset['birth_city'])),
+        'university': list(set(test_profiles_dataset['university'])),
+        'employer': list(set(test_profiles_dataset['employer'])),
+        **{r: list(set(profile['name'] for profile in test_profiles_dataset[r])) for r in relations}
+    }
+
+    entropies = {attr: calculate_entropy(values, attr, scheme=scheme) 
+                for attr, values in attribute_values.items() 
+                if attr != 'name'}
+    name_selection_entropy = calculate_selection_entropy(
+        attribute_values['name'], 
+        'name', 
+        selection_scheme=selection_scheme,
+        N=N
+    )
+    birth_date_selection_entropy = calculate_selection_entropy(
+        attribute_values['birth_date'], 
+        'birth_date', 
+        selection_scheme=selection_scheme,
+        N=N
+    )
+
+    return entropies, name_selection_entropy, birth_date_selection_entropy
+
+def dataset_entropy(
+        test_profiles_dataset, 
+        N=None, 
+        scheme="optimal",
+        selection_scheme="optimal"
+    ):
+    entropies, name_selection_entropy, birth_date_selection_entropy = dataset_component_entropies(
+        test_profiles_dataset, 
+        N, 
+        scheme,
+        selection_scheme
+    )
+
+    dummy_losses = {subject: 0 for subject in entropies}
+    dummy_losses['all_questions'] = 0
+
+    dataset_entropy_1hop = calculate_capacities(
+        dummy_losses, 
+        entropies, 
+        name_selection_entropy, 
+        birth_date_selection_entropy, 
+        N,
+        1,
+        scheme,
+        incremental=False
+    )
+
+    dataset_entropy_2hop = calculate_capacities(
+        dummy_losses, 
+        entropies, 
+        name_selection_entropy, 
+        birth_date_selection_entropy, 
+        N,
+        2,
+        scheme,
+        incremental=True
+    )
+
+    return dataset_entropy_1hop, dataset_entropy_2hop
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--checkpoint", type=str, default="latest")
@@ -224,12 +361,13 @@ def main():
         }
 
         # Calculate entropies
-        entropies = {attr: calculate_entropy(values, attr, scheme=args.scheme) 
-                    for attr, values in attribute_values.items() 
-                    if attr != 'name'}
-        name_selection_entropy = calculate_entropy(attribute_values['name'], 'name', selection=True, scheme=args.selection_scheme)
-        birth_date_selection_entropy = calculate_entropy(attribute_values['birth_date'], 'birth_date', selection=True, scheme=args.selection_scheme)
-
+        entropies, name_selection_entropy, birth_date_selection_entropy = dataset_component_entropies(
+            profiles_dataset, 
+            N, 
+            args.scheme,
+            args.selection_scheme
+        )
+        
         # Process all timesteps
         timestep_results = process_timestep_data(
             eval_results, 

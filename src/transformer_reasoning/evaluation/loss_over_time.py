@@ -38,11 +38,14 @@ def evaluate_checkpoints(
     max_order: int,
     params: int,
     wd: float,
+    layer: int,
     compute_histograms: bool = False,
+    relation: Optional[str] = None
 ) -> Union[DataFrame, Tuple[DataFrame, Dict[str, List[float]]]]:
     """Evaluate loss for different tasks across checkpoints."""
     # Load existing results if they exist
-    results_path = f'./results/n{N}_p{params}_omin{min_order}_omax{max_order}_wd{wd}_l4_lr0.001_beta10.99_sf/eval_results_full.csv'
+    results_path = f'./results/n{N}_p{params}_omin{min_order}_omax{max_order}_wd{wd}_l{layer}_lr0.001_beta10.99_sf{relation}/eval_results_full.csv'
+    save_path = f'./results/n{N}_p{params}_omin{min_order}_omax{max_order}_wd{wd}_l{layer}_lr0.001_beta10.99_sf{relation}/eval_results_old.csv'
     existing_results = pd.DataFrame()
     if Path(results_path).exists():
         existing_results = pd.read_csv(results_path)
@@ -52,9 +55,10 @@ def evaluate_checkpoints(
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
     
-    checkpoints = get_checkpoints(min_order, max_order, N, params, wd)
+    checkpoints = get_checkpoints(min_order, max_order, N, params, wd, relation, layers=layer)
 
     if not checkpoints:
+        print(f"No checkpoints found for n{N}_p{params}_omin{min_order}_omax{max_order}_wd{wd}_l{layer}_lr0.001_beta10.99_sf{relation}")
         return existing_results if not existing_results.empty else None
 
     # Filter checkpoints to only evaluate new ones
@@ -157,6 +161,8 @@ def evaluate_checkpoints(
         results['min_train_hops'] = min_order
         results['max_train_hops'] = max_order
         results['wd'] = wd
+
+        results.to_csv(save_path, index=False)
         
         all_results.append(results)
 
@@ -245,33 +251,42 @@ def plot_losses(all_results: DataFrame, save_path: Optional[str] = None):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--compute_histograms', action='store_true')
+    parser.add_argument('--Ns', nargs='+', type=int, default=[10000, 15000, 20000, 25000, 30000, 50000])
+    parser.add_argument('--params', nargs='+', type=int, default=[435888, 890320, 1166688, 1475824])
+    parser.add_argument('--layers', nargs='+', type=int, default=[4, 12])
+    parser.add_argument('--relations', nargs='+', type=int, default=[None])
     args = parser.parse_args()
 
     wd = 0.1
-    for N in [10000, 15000, 20000, 25000, 30000, 50000]:
+    for N in args.Ns:
         full_results = []
         all_histograms = []
 
-        for params in [435888, 890320, 1166688, 1475824]:
+        for params in args.params:
             for min_order in [1, 2]:
                 for max_order in range(min_order, 3):
-                    result = evaluate_checkpoints(
-                        N=N,
-                        min_order=min_order,
-                        max_order=max_order,
-                        params=params,
-                        wd=wd,
-                        compute_histograms=args.compute_histograms
-                    )
-                    if result is not None:
-                        if args.compute_histograms:
-                            df, histograms = result
-                            hist_df = pd.DataFrame(histograms)
-                            hist_df.to_csv(f'./results/n{N}_p{params}_omin{min_order}_omax{max_order}_wd{wd}_l4_lr0.001_beta10.99_sf/eval_results_histograms.csv')
-                            all_histograms.append(hist_df)
-                        else:
-                            result.to_csv(f'./results/n{N}_p{params}_omin{min_order}_omax{max_order}_wd{wd}_l4_lr0.001_beta10.99_sf/eval_results_full.csv')
-                            full_results.append(result)
+                    for layer in args.layers:
+                        for relation in args.relations:
+                            relation_str = f'_r{relation}' if relation else ''
+                            result = evaluate_checkpoints(
+                                N=N,
+                                min_order=min_order,
+                                max_order=max_order,
+                                params=params,
+                                wd=wd,
+                                layer=layer,
+                                compute_histograms=args.compute_histograms,
+                                relation=relation_str
+                            )
+                            if result is not None:
+                                if args.compute_histograms:
+                                    df, histograms = result
+                                    hist_df = pd.DataFrame(histograms)
+                                    hist_df.to_csv(f'./results/n{N}_p{params}_omin{min_order}_omax{max_order}_wd{wd}_l{layer}_lr0.001_beta10.99_sf{relation_str}/eval_results_histograms.csv')
+                                    all_histograms.append(hist_df)
+                                else:
+                                    result.to_csv(f'./results/n{N}_p{params}_omin{min_order}_omax{max_order}_wd{wd}_l{layer}_lr0.001_beta10.99_sf{relation_str}/eval_results_full.csv')
+                                    full_results.append(result)
                         
         # Append new results if any
         if full_results:

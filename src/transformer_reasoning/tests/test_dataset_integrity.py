@@ -15,7 +15,7 @@ tokenizer = AutoTokenizer.from_pretrained("EleutherAI/llama_multihop_tokenizer")
 # Initialize datasets for all modes
 modes = [
     "train",
-    "eval_random",
+    "eval_complete_two_hop_questions",
     "eval_first_people",
     "eval_relations",
     "eval_person_relation_pairs",
@@ -75,7 +75,7 @@ def test_dataset(dataset, mode, n_samples=100):
     
     # Collect samples
     for _ in range(n_samples):
-        sample = dataset.generate_qa()
+        sample = dataset.generate_qa(dataset.heldout_sets)
         components = parse_question(sample, dataset.profiles)
         if components and components['hops'] == 2:
             samples['first_person'].append(components['first_person'])
@@ -116,6 +116,10 @@ def test_dataset(dataset, mode, n_samples=100):
         for second_person, attribute in zip(samples['second_person'], samples['attribute']):
             assert (second_person, attribute) not in heldout_sets['second_person_attribute_pairs'], \
                 f"Found held-out second person-attribute pair {second_person} {attribute} in training data"
+        
+        for first_person, relation, attribute in zip(samples['first_person'], samples['relation'], samples['attribute']):
+            assert (first_person, relation, attribute) not in heldout_sets['complete_two_hop_questions'], \
+                f"Found held-out complete two-hop question {first_person} {relation} {attribute} in training data"
 
 
     elif mode == "eval_first_people":
@@ -150,7 +154,9 @@ def test_dataset(dataset, mode, n_samples=100):
     elif mode == "eval_second_person_attribute_pairs":
         # Check that all second person-attribute pairs are from held-out set
         for second_person, attribute in zip(samples['second_person'], samples['attribute']):
-            assert (second_person, attribute.replace(' ', '_')) in heldout_sets['second_person_attribute_pairs'], \
+            second_person_idx = next((i for i in range(len(profiles_dataset)) 
+                             if profiles_dataset[i]['name'] == second_person), None)
+            assert (second_person_idx, attribute.replace(' ', '_')) in heldout_sets['second_person_attribute_pairs'], \
                 f"Found non-held-out second person-attribute pair {second_person} {attribute} in eval data"
 
     elif mode == "eval_person_relation_pairs":
