@@ -16,7 +16,7 @@ import jax
 from datasets import load_dataset
 
 from transformer_reasoning.generate_dataset.generate_bios import load_templates
-from transformer_reasoning.generate_dataset.generate_qa_dataset import maybe_generate_question, RELATIONS, ATTRIBUTES
+from transformer_reasoning.generate_dataset.generate_qa_dataset import maybe_generate_question, get_available_relations, ATTRIBUTES
 from transformer_reasoning.utils import get_project_root
 
 
@@ -87,24 +87,25 @@ class InfiniteQADataset(IterableDataset):
     def _generate_all_heldout_sets(self, fraction):
         if not dist.is_initialized() or dist.get_rank() == 0:
             n_profiles = len(self.profiles)
-            n_relations = len(RELATIONS) 
+            available_relations = get_available_relations(self.profiles[0])
+            n_relations = len(available_relations) 
             n_attributes = len(ATTRIBUTES)
 
             self.heldout_sets = {
                 "first_people": sorted(random.sample(range(n_profiles), max(1, int(n_profiles * fraction)))),
-                "relations": sorted(random.sample(RELATIONS, max(1, int(n_relations * fraction)))),
+                "relations": sorted(random.sample(available_relations, max(1, int(n_relations * fraction)))),
                 "person_relation_pairs": sorted(
-                    random.sample([(p, r) for p in range(n_profiles) for r in RELATIONS], 
+                    random.sample([(p, r) for p in range(n_profiles) for r in available_relations], 
                                 max(1, int(n_profiles * n_relations * fraction)))
                 ),
                 "second_people": sorted(random.sample(range(n_profiles), max(1, int(n_profiles * fraction)))),
-                "second_attributes": sorted(random.sample(ATTRIBUTES + RELATIONS, max(1, int(n_attributes * fraction)))),
+                "second_attributes": sorted(random.sample(ATTRIBUTES + available_relations, max(1, int(n_attributes * fraction)))),
                 "second_person_attribute_pairs": sorted(
-                    random.sample([(p, a) for p in range(n_profiles) for a in ATTRIBUTES + RELATIONS],
+                    random.sample([(p, a) for p in range(n_profiles) for a in ATTRIBUTES + available_relations],
                                 max(1, int(n_profiles * n_attributes * fraction)))
                 ),
                 "complete_two_hop_questions": sorted(
-                    random.sample([(p, r, a) for p in range(n_profiles) for r in RELATIONS for a in ATTRIBUTES],
+                    random.sample([(p, r, a) for p in range(n_profiles) for r in available_relations for a in ATTRIBUTES],
                                 max(1, int(n_profiles * n_relations * n_attributes * fraction)))
                 )
             }
@@ -153,18 +154,7 @@ class InfiniteQADataset(IterableDataset):
         
         # Convert lists to sets for fast lookup during iteration
         if self.debug:
-            print(f"IN ITER Rank {dist.get_rank()}:")
-            pairs = self.heldout_sets['second_person_attribute_pairs']
-            print(f"Length: {len(pairs)}")
-            print(f"First 3: {pairs[:3]}")
-            print(f"Last 3: {pairs[-3:]}")
-            print(f"Types: {[type(p) for p in pairs[0]]}")
-            print(f"Hash: {hash(tuple(pairs))}")
             heldout_sets = self.heldout_sets
-            print(f"heldout sets hash: {hash(tuple((k, tuple(v)) for k, v in heldout_sets.items()))}")
-            print(f"first people hash: {hash(tuple(heldout_sets['first_people']))}")
-            print(f"second person attribute pairs hash: {hash(tuple(heldout_sets['second_person_attribute_pairs']))}")
-            print(f"length of 2pap: {len(self.heldout_sets['second_person_attribute_pairs'])}")
         else:
             heldout_sets = {k: frozenset(v) for k, v in self.heldout_sets.items()}
 
@@ -172,8 +162,6 @@ class InfiniteQADataset(IterableDataset):
         seed = self._seed_offset + rank + self.worker_id + self._epoch
         torch.manual_seed(seed)
         random.seed(seed)
-        print(f"Rank: {rank}, Worker ID: {self.worker_id}, Epoch: {self._epoch}, Seed offset: {self._seed_offset}, Seed: {seed}")
-
         
         # Calculate samples for this worker based on dataset length
         total_samples = len(self)  # This now accounts for world_size

@@ -133,7 +133,7 @@ def maybe_generate_question(
                     available_subjects = list(heldout_sets["second_attributes"])
                     subject = random.choice(available_subjects)
                 elif eval_type == "second_person_attribute_pairs":
-                    for relation in RELATIONS:
+                    for relation in available_relations:
                         related_profile = profiles[profile[relation]['index']]
                         available_subjects = [att for (idx, att) in heldout_sets["second_person_attribute_pairs"] if idx == related_profile['index']]
                         if len(available_subjects) > 0:

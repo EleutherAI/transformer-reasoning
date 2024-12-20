@@ -30,7 +30,7 @@ def main(args):
     curr_str = "_curr" if args.curriculum else ""
     sf_str = "sf" if args.optimizer_type == "schedulefree" else "adamw"
     hop_str = f"_hr{args.hop_ratio}" if args.hop_ratio != 0.1 else ""
-    output_dir = f"./results/n{args.N}_p{real_num_params}_omin{min(args.orders)}_omax{max(args.orders)}_wd{args.wd}_l{args.num_layers}_lr{args.lr}_beta1{args.beta1}_{sf_str}{rel_str}{hop_str}{curr_str}"
+    output_dir = f"./results/synchronized/n{args.N}_p{real_num_params}_omin{min(args.orders)}_omax{max(args.orders)}_wd{args.wd}_l{args.num_layers}_lr{args.lr}_beta1{args.beta1}_{sf_str}{rel_str}{hop_str}{curr_str}"
 
     if args.resume_from_checkpoint:
         checkpoints = glob.glob(os.path.join(output_dir, "checkpoint-*"))
