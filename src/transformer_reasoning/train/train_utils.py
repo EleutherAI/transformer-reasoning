@@ -254,6 +254,13 @@ def train_single_model(
                         else:
                             results_df.to_csv(f"{output_dir}/eval_results.csv", index=False)
                 
+                    if log_file:
+                        with open(log_file, 'a') as f:
+                            f.write(json.dumps(log_entry) + '\n')
+
+                    # Store latest eval losses
+                    eval_losses = {mode: results[mode]['loss'] for mode in eval_modes}
+
                 # Synchronize again before resuming training
                 if dist.is_initialized():
                     dist.barrier()
@@ -271,14 +278,6 @@ def train_single_model(
                         print("\nSwitching to full curriculum - enabling 2-hop questions")
                         train_dataset.order_weights = [0.1, 1.0]
                         curriculum_switched = True
-
-                # Write log entry
-                if log_file:
-                    with open(log_file, 'a') as f:
-                        f.write(json.dumps(log_entry) + '\n')
-
-                # Store latest eval losses
-                eval_losses = {mode: results[mode]['loss'] for mode in eval_modes}
 
             if n_steps and global_step >= n_steps:
                     break
