@@ -30,11 +30,14 @@ def main(args):
     curr_str = "_curr" if args.curriculum else ""
     sf_str = "sf" if args.optimizer_type == "schedulefree" else "adamw"
     hop_str = f"_hr{args.hop_ratio}" if args.hop_ratio != 0.1 else ""
-    output_dir = f"./results/n{args.N}_p{real_num_params}_omin{min(args.orders)}_omax{max(args.orders)}_wd{args.wd}_l{args.num_layers}_lr{args.lr}_beta1{args.beta1}_{sf_str}{rel_str}{hop_str}{curr_str}"
+    output_dir = f"./results/synchronized/n{args.N}_p{real_num_params}_omin{min(args.orders)}_omax{max(args.orders)}_wd{args.wd}_l{args.num_layers}_lr{args.lr}_beta1{args.beta1}_{sf_str}{rel_str}{hop_str}{curr_str}"
 
     if args.resume_from_checkpoint:
         checkpoints = glob.glob(os.path.join(output_dir, "checkpoint-*"))
-        latest_checkpoint = sorted(checkpoints, key=lambda x: int(x.split("-")[-1]))[-1]
+        if not args.checkpoint_number:
+            latest_checkpoint = sorted(checkpoints, key=lambda x: int(x.split("-")[-1]))[-1]
+        else:
+            latest_checkpoint = [c for c in checkpoints if f"checkpoint-{args.checkpoint_number}" in c][0]
         print(f"Loading model from checkpoint: {latest_checkpoint}")
         model = LlamaForCausalLM.from_pretrained(latest_checkpoint)
 
@@ -71,6 +74,7 @@ if __name__ == "__main__":
     parser.add_argument("--num_training_steps", type=int, default=9_000_000,
                         help="Total number of training steps (required for adamw cosine scheduler)")
     parser.add_argument("--resume_from_checkpoint", action="store_true", help="Resume training from checkpoint")
+    parser.add_argument("--checkpoint_number", type=int, default=None, help="Checkpoint number to resume from")
     parser.add_argument("--num_workers", type=int, default=15, help="Number of workers for data loading")
     parser.add_argument("--relations", type=str, default=None, help="Number of relations in the QA dataset")
     parser.add_argument("--curriculum", action="store_true", help="Use curriculum learning starting with 1-hop only")
