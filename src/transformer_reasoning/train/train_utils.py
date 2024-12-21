@@ -48,7 +48,6 @@ def train_single_model(
         if not dist.is_initialized():
             dist.init_process_group(backend='nccl')
         local_rank = dist.get_rank()
-        print(f"Local rank: {local_rank}")
         is_main_process = local_rank == 0
         torch.cuda.set_device(local_rank)
         device = f'cuda:{local_rank}'
@@ -176,6 +175,7 @@ def train_single_model(
             
             optimizer.zero_grad()
             
+
             global_step += 1
 
             should_save = (global_step < 100000 and global_step in early_saves) or \
@@ -184,46 +184,29 @@ def train_single_model(
             # Update progress bar with both train and stored eval losses
             postfix = {
                 'step': global_step,
-                'train_loss': loss.item(),
                 **{f'{mode}_loss': eval_losses.get(mode, 0) for mode in eval_modes}
             }
             if is_main_process:
                 pbar.set_postfix(postfix)
 
+
             if should_save:
-                # Synchronize all processes before evaluation
                 if dist.is_initialized():
-                    dist.barrier()
+                    dist.barrier()  # Sync before eval
                 
+                # All ranks participate in evaluation
+                model.eval()
+                if hasattr(optimizer, 'eval'):
+                    optimizer.eval()
+                
+                results = {}
+                for mode, loader in eval_loaders.items():
+                    results[mode] = evaluate_single_model(model, loader, global_step, mode)
+                
+                # Only rank 0 saves results and updates progress
                 if is_main_process:
-                    log_entry = {
-                        'step': global_step,
-                        'epoch': epoch,
-                        'timestamp': datetime.now().isoformat()
-                    }
-
-                    # Evaluation mode
-                    model.eval()
-                    if hasattr(optimizer, 'eval'):
-                        optimizer.eval()
+                    results_dicts.extend(results.values())
                     
-                    # Evaluate and save only on main process
-                    results = {}
-                    for mode, loader in eval_loaders.items():
-                        results[mode] = evaluate_single_model(model, loader, global_step, mode)
-                        results_dicts.append(results[mode])
-                        
-                        # Add to log entry
-                        log_entry[f'{mode}_loss'] = results[mode]['loss']
-                        
-                    # Update progress bar
-                    if is_main_process:
-                        pbar.set_postfix({
-                            **{f'{mode}_loss': results[mode]['loss'] for mode in eval_modes},
-                            'step': global_step,
-                            "train_loss": loss.item()
-                        })
-
                     # Save checkpoint
                     if output_dir:
                         model_path = f"{output_dir}/checkpoint-{global_step}"
@@ -232,38 +215,43 @@ def train_single_model(
                         else:
                             model.save_pretrained(model_path)
                         
-                        # Save optimizer and scheduler state
                         optimizer_state = {
                             'optimizer_state_dict': optimizer.state_dict(),
                             'step': global_step,
-                            'heldout_sets': train_dataset.heldout_sets,  # Add holdout sets
-                            **{f'{mode}_loss': results_dicts[-len(eval_modes) + i]['loss'] 
-                            for i, mode in enumerate(eval_modes)},
-                            'train_loss': loss.item()
+                            'heldout_sets': train_dataset.heldout_sets,
+                            **{f'{mode}_loss': results[mode]['loss'] for mode in eval_modes}
                         }
                         if scheduler:
                             optimizer_state['scheduler_state_dict'] = scheduler.state_dict()
                         torch.save(optimizer_state, f"{model_path}/optimizer.pt")
                     
+                    # Log results
                     if not debug:
                         results_df = pd.DataFrame(results_dicts)
-                        # Save results
                         if os.path.exists(f"{output_dir}/eval_results.csv"):
                             results_df = results_df[results_df['global_step'] == global_step]
                             results_df.to_csv(f"{output_dir}/eval_results.csv", mode='a', header=False, index=False)
                         else:
                             results_df.to_csv(f"{output_dir}/eval_results.csv", index=False)
-                
+                    
                     if log_file:
+                        log_entry = {
+                            'step': global_step,
+                            'epoch': epoch,
+                            'timestamp': datetime.now().isoformat(),
+                            **{f'{mode}_loss': results[mode]['loss'] for mode in eval_modes}
+                        }
                         with open(log_file, 'a') as f:
                             f.write(json.dumps(log_entry) + '\n')
-
-                    # Store latest eval losses
-                    eval_losses = {mode: results[mode]['loss'] for mode in eval_modes}
-
-                # Synchronize again before resuming training
+                    
+                    # Update progress bar
+                    pbar.set_postfix({
+                        **{f'{mode}_loss': results[mode]['loss'] for mode in eval_modes},
+                        'step': global_step,
+                    })
+                
                 if dist.is_initialized():
-                    dist.barrier()
+                    dist.barrier()  # Sync after saving
                 
                 # Back to training mode
                 model.train()
@@ -279,8 +267,9 @@ def train_single_model(
                         train_dataset.order_weights = [0.1, 1.0]
                         curriculum_switched = True
 
+
             if n_steps and global_step >= n_steps:
-                    break
+                break
 
     if debug:
         return optimizer, last_batch
