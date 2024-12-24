@@ -108,7 +108,8 @@ def train_single_model(
             "eval_person_relation_pairs",
             "eval_second_people",
             "eval_second_attributes",
-            "eval_second_person_attribute_pairs"
+            "eval_second_person_attribute_pairs",
+            "eval_complete_two_hop_questions"
         ]
     else:
         eval_modes = []
@@ -179,7 +180,7 @@ def train_single_model(
             global_step += 1
 
             should_save = (global_step < 100000 and global_step in early_saves) or \
-                (global_step >= 100000 and global_step % 100000 == 0)
+                (global_step >= 100000 and global_step % 100000 == 1)
             
             # Update progress bar with both train and stored eval losses
             postfix = {
@@ -260,9 +261,9 @@ def train_single_model(
             
                 # Check curriculum condition (using train_twohop loss)
                 if curriculum and not curriculum_switched:
-                    train_twohop_loss = next(r['loss'] for r in results_dicts[-len(eval_modes):] 
-                                           if r['mode'] == 'train_twohop')
-                    if train_twohop_loss < 1.0:
+                    train_onehop_loss = next(r['loss'] for r in results_dicts[-len(eval_modes):] 
+                                           if r['mode'] == 'train_onehop')
+                    if train_onehop_loss < 1.0:
                         print("\nSwitching to full curriculum - enabling 2-hop questions")
                         train_dataset.order_weights = [0.1, 1.0]
                         curriculum_switched = True
@@ -285,7 +286,7 @@ def evaluate_single_model(model, eval_loader, global_step, mode):
 
     with torch.no_grad():
         eval_questions = 0
-        pbar = tqdm(eval_loader, desc=f"Evaluating {mode}")
+        pbar = tqdm(eval_loader, desc=f"Evaluating {mode}; dataloader mode: {eval_loader.dataset.mode}")
         for eval_batch in pbar:
             labels = eval_batch['labels']
             last_neg = labels[:,-1] == -100

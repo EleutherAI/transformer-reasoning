@@ -144,14 +144,13 @@ def maybe_generate_question(
                 else:
                     raise ValueError(f"Invalid eval mode: {mode}")
                 
-            if order == 2:
-                question = SECOND_ORDER_TEMPLATE.format(
-                    name=name,
-                    relation=relation.replace('_', ' '), 
-                    subject=subject.replace('_', ' ')
-                )
-                answer = related_profile[subject]['name'] if subject in RELATIONS else related_profile[subject]
-                assert profile[relation]['name'] == related_profile['name'], f"Profile {profile['name']} and {related_profile['name']} are not related by {relation}; {profile[relation]['name']} != {related_profile['name']}"
+            question = SECOND_ORDER_TEMPLATE.format(
+                name=name,
+                relation=relation.replace('_', ' '), 
+                subject=subject.replace('_', ' ')
+            )
+            answer = related_profile[subject]['name'] if subject in RELATIONS else related_profile[subject]
+            assert profile[relation]['name'] == related_profile['name'], f"Profile {profile['name']} and {related_profile['name']} are not related by {relation}; {profile[relation]['name']} != {related_profile['name']}"
 
     if isinstance(answer, datetime.date):
         answer = answer.strftime('%Y-%m-%d')

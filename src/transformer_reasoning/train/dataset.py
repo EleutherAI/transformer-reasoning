@@ -80,6 +80,11 @@ class InfiniteQADataset(IterableDataset):
         else:
             self._generate_all_heldout_sets(heldout_fraction)
 
+        if self.debug:
+            self.heldout_sets_for_use = self.heldout_sets
+        else:
+            self.heldout_sets_for_use = {k: frozenset(v) for k, v in self.heldout_sets.items()}
+
     def set_epoch(self, epoch):
         """Allow external epoch updates"""
         self._epoch = epoch
@@ -105,7 +110,7 @@ class InfiniteQADataset(IterableDataset):
                                 max(1, int(n_profiles * n_attributes * fraction)))
                 ),
                 "complete_two_hop_questions": sorted(
-                    random.sample([(p, r, a) for p in range(n_profiles) for r in available_relations for a in ATTRIBUTES],
+                    random.sample([(p, r, a) for p in range(n_profiles) for r in available_relations for a in available_relations + ATTRIBUTES],
                                 max(1, int(n_profiles * n_relations * n_attributes * fraction)))
                 )
             }
@@ -149,29 +154,22 @@ class InfiniteQADataset(IterableDataset):
 
         # Print epoch, rank and worker info
         if self.worker_id == 0 and (not dist.is_initialized() or dist.get_rank() == 0):
-            print(f"Dataset iterator called with epoch {self._epoch}")
-        
-        
-        # Convert lists to sets for fast lookup during iteration
-        if self.debug:
-            heldout_sets = self.heldout_sets
-        else:
-            heldout_sets = {k: frozenset(v) for k, v in self.heldout_sets.items()}
+            print(f"Dataset iterator called with epoch {self._epoch} mode {self.mode}")
 
         # Set random seed based on epoch, rank, worker_id, and a random offset
-        seed = self._seed_offset + rank + self.worker_id + self._epoch
+        seed = self._seed_offset + 1000 * rank + 1000000 * self.worker_id + self._epoch
         torch.manual_seed(seed)
         random.seed(seed)
         
         # Calculate samples for this worker based on dataset length
-        total_samples = len(self)  # This now accounts for world_size
+        total_samples = len(self)
         worker_samples = (total_samples // self._batch_size) * self._batch_size // self.num_workers
         
         samples_processed = 0
         while samples_processed < worker_samples:
             texts = []
             for _ in range(self.samples_per_yield):
-                question = self.generate_qa(heldout_sets)
+                question = self.generate_qa(self.heldout_sets_for_use)
                 texts.append(question)
 
             # If no tokenizer provided, just return the text chunk
