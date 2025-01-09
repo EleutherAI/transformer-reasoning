@@ -1,0 +1,33 @@
+@misc{allen-zhuPhysicsLanguageModels2024,
+  title = {Physics of {{Language Models}}: {{Part}} 3.3, {{Knowledge Capacity Scaling Laws}}},
+  shorttitle = {Physics of {{Language Models}}},
+  author = {{Allen-Zhu}, Zeyuan and Li, Yuanzhi},
+  year = {2024},
+  month = apr,
+  number = {arXiv:2404.05405},
+  eprint = {2404.05405},
+  primaryclass = {cs},
+  publisher = {arXiv},
+  doi = {10.48550/arXiv.2404.05405},
+  urldate = {2025-01-07},
+  abstract = {Scaling laws describe the relationship between the size of language models and their capabilities. Unlike prior studies that evaluate a model's capability via loss or benchmarks, we estimate the number of knowledge bits a model stores. We focus on factual knowledge represented as tuples, such as (USA, capital, Washington D.C.) from a Wikipedia page. Through multiple controlled datasets, we establish that language models can and only can store 2 bits of knowledge per parameter, even when quantized to int8, and such knowledge can be flexibly extracted for downstream applications. Consequently, a 7B model can store 14B bits of knowledge, surpassing the English Wikipedia and textbooks combined based on our estimation. More broadly, we present 12 results on how (1) training duration, (2) model architecture, (3) quantization, (4) sparsity constraints such as MoE, and (5) data signal-to-noise ratio affect a model's knowledge storage capacity. Notable insights include: * The GPT-2 architecture, with rotary embedding, matches or even surpasses LLaMA/Mistral architectures in knowledge storage, particularly over shorter training durations. This arises because LLaMA/Mistral uses GatedMLP, which is less stable and harder to train. * Prepending training data with domain names (e.g., wikipedia.org) significantly increases a model's knowledge capacity. Language models can autonomously identify and prioritize domains rich in knowledge, optimizing their storage capacity.},
+  archiveprefix = {arXiv},
+  keywords = {Computer Science - Artificial Intelligence,Computer Science - Computation and Language,Computer Science - Machine Learning}
+}
+
+@misc{wangGrokkedTransformersAre2024,
+  title = {Grokked {{Transformers}} Are {{Implicit Reasoners}}: {{A Mechanistic Journey}} to the {{Edge}} of {{Generalization}}},
+  shorttitle = {Grokked {{Transformers}} Are {{Implicit Reasoners}}},
+  author = {Wang, Boshi and Yue, Xiang and Su, Yu and Sun, Huan},
+  year = {2024},
+  month = oct,
+  number = {arXiv:2405.15071},
+  eprint = {2405.15071},
+  primaryclass = {cs},
+  publisher = {arXiv},
+  doi = {10.48550/arXiv.2405.15071},
+  urldate = {2025-01-07},
+  abstract = {We study whether transformers can learn to implicitly reason over parametric knowledge, a skill that even the most capable language models struggle with. Focusing on two representative reasoning types, composition and comparison, we consistently find that transformers can learn implicit reasoning, but only through grokking, i.e., extended training far beyond overfitting. The levels of generalization also vary across reasoning types: when faced with out-of-distribution examples, transformers fail to systematically generalize for composition but succeed for comparison. We delve into the model's internals throughout training, conducting analytical experiments that reveal: 1) the mechanism behind grokking, such as the formation of the generalizing circuit and its relation to the relative efficiency of generalizing and memorizing circuits, and 2) the connection between systematicity and the configuration of the generalizing circuit. Our findings guide data and training setup to better induce implicit reasoning and suggest potential improvements to the transformer architecture, such as encouraging cross-layer knowledge sharing. Furthermore, we demonstrate that for a challenging reasoning task with a large search space, GPT-4-Turbo and Gemini-1.5-Pro based on non-parametric memory fail badly regardless of prompting styles or retrieval augmentation, while a fully grokked transformer can achieve near-perfect accuracy, showcasing the power of parametric memory for complex reasoning.},
+  archiveprefix = {arXiv},
+  keywords = {Computer Science - Computation and Language}
+}

@@ -1,17 +1,8 @@
 import random
-from typing import Iterator, Dict
-from concurrent.futures import ThreadPoolExecutor
-import queue
-import threading
-import time
-from functools import partial
 
 import torch.distributed as dist
 import torch
 from torch.utils.data import IterableDataset
-
-import jax.numpy as jnp
-import jax
 
 from datasets import load_dataset
 
@@ -22,16 +13,15 @@ from transformer_reasoning.utils import get_project_root
 
 def load_and_prepare_datasets(
         tokenizer, 
-        N=250000, 
+        N=25000, 
         orders=None, 
         relations=None, 
         hop_ratio=0.1, 
-        jax=False, 
         heldout_sets=None, 
         debug=False
     ):
 
-    dataset_class = JAXQADataset if jax else InfiniteQADataset
+    dataset_class = InfiniteQADataset
 
     relation_str = f'_r{relations}' if relations else ''
     # Load profiles dataset
@@ -262,8 +252,6 @@ class InfiniteQADataset(IterableDataset):
         return labels, torch.arange(len(labels[0]))
 
 
-
-
 class MultiDataset(IterableDataset):
     def __init__(self, datasets, weights):
         """
@@ -276,18 +264,35 @@ class MultiDataset(IterableDataset):
         self.weights = [w/total_weight for w in weights]  # Normalize weights
         self.tokenizer = datasets[0].tokenizer  # Assume all datasets use same tokenizer
         self.max_seq_len = datasets[0].max_seq_len
+        self.profiles_dataset_index = 0
+
+    @property
+    def heldout_sets(self):
+        """Return list of heldout_sets from child datasets"""
+        return self.datasets[self.profiles_dataset_index].heldout_sets
+    
+    @property
+    def profiles(self):
+        """Return list of profiles from child datasets"""
+        return self.datasets[self.profiles_dataset_index].profiles
+
+    def __len__(self):
+        return int(min([len(dataset) * sum(self.weights) / self.weights[i] for i, dataset in enumerate(self.datasets)]))
 
     def __iter__(self):
         iterators = [iter(dataset) for dataset in self.datasets]
+        samples_yielded = 0
+        total_samples = len(self)
         
-        while True:
+        while samples_yielded < total_samples:
             dataset_idx = random.choices(range(len(self.datasets)), weights=self.weights, k=1)[0]
-            
-            sample = next(iterators[dataset_idx])
-            
-            sample['dataset_idx'] = torch.tensor([dataset_idx], dtype=torch.long)
-            
-            yield sample
+            try:
+                sample = next(iterators[dataset_idx])
+                sample['dataset_idx'] = torch.tensor([dataset_idx], dtype=torch.long)
+                yield sample
+                samples_yielded += 1
+            except StopIteration:
+                return  # This will implicitly raise StopIteration
 
     def set_epoch(self, epoch):
         """Propagate epoch to all datasets"""

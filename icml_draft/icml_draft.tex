@@ -1,0 +1,804 @@
+%%%%%%%% ICML 2024 EXAMPLE LATEX SUBMISSION FILE %%%%%%%%%%%%%%%%%
+
+\documentclass{article}
+
+% Recommended, but optional, packages for figures and better typesetting:
+\usepackage{microtype}
+\usepackage{graphicx}
+\usepackage{subfigure}
+\usepackage{booktabs} % for professional tables
+\usepackage{subcaption}
+
+% hyperref makes hyperlinks in the resulting PDF.
+% If your build breaks (sometimes temporarily if a hyperlink spans a page)
+% please comment out the following usepackage line and replace
+% \usepackage{icml2024} with \usepackage[nohyperref]{icml2024} above.
+\usepackage{cancel}
+\usepackage{hyperref}
+
+
+% Attempt to make hyperref and algorithmic work together better:
+\newcommand{\theHalgorithm}{\arabic{algorithm}}
+
+% Use the following line for the initial blind version submitted for review:
+% \usepackage{icml2024}
+
+% If accepted, instead use the following line for the camera-ready submission:
+\usepackage[accepted]{icml2024}
+
+% For theorems and such
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{mathtools}
+\usepackage{amsthm}
+
+% if you use cleveref..
+\usepackage[capitalize,noabbrev]{cleveref}
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+% THEOREMS
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+\theoremstyle{plain}
+\newtheorem{theorem}{Theorem}[section]
+\newtheorem{proposition}[theorem]{Proposition}
+\newtheorem{lemma}[theorem]{Lemma}
+\newtheorem{corollary}[theorem]{Corollary}
+\theoremstyle{definition}
+\newtheorem{definition}[theorem]{Definition}
+\newtheorem{assumption}[theorem]{Assumption}
+\theoremstyle{remark}
+\newtheorem{remark}[theorem]{Remark}
+
+\newcommand{\aalpha}{\boldsymbol{\alpha}}
+\newcommand{\bbeta}{\boldsymbol{\beta}}
+\newcommand{\eepsilon}{\boldsymbol{\epsilon}}
+\newcommand{\mmu}{\boldsymbol{\mu}}
+\newcommand{\Pphi}{\boldsymbol{\Phi}}
+\newcommand{\SSigma}{\boldsymbol{\Sigma}}
+
+\newcommand{\E}{\mathbb{E}}
+\newcommand{\R}{\mathbb{R}}
+
+\newcommand{\II}{\boldsymbol{I}}
+\newcommand{\xx}{\boldsymbol{x}}
+\newcommand{\yy}{\boldsymbol{y}}
+\newcommand{\zz}{\boldsymbol{z}}
+
+% Todonotes is useful during development; simply uncomment the next line
+%    and comment out the line below the next line to turn off comments
+%\usepackage[disable,textsize=tiny]{todonotes}
+\usepackage[textsize=tiny]{todonotes}
+
+
+% The \icmltitle you define below is probably too long as a header.
+% Therefore, a short form for the running title is supplied here:
+\icmltitlerunning{Understanding Transformers through Capacity Scaling}
+
+\begin{document}
+
+\twocolumn[
+\icmltitle{Understanding Transformers through Capacity Scaling}
+
+% It is OKAY to include author information, even for blind
+% submissions: the style file will automatically remove it for you
+% unless you've provided the [accepted] option to the icml2024
+% package.
+
+% List of affiliations: The first argument should be a (short)
+% identifier you will use later to specify author affiliations
+% Academic affiliations should list Department, University, City, Region, Country
+% Industry affiliations should list Company, City, Region, Country
+
+% You can specify symbols, otherwise they are numbered in order.
+% Ideally, you should not use this facility. Affiliations will be numbered
+% in order of appearance and this is the preferred way.
+\icmlsetsymbol{equal}{*}
+
+\begin{icmlauthorlist}
+\icmlauthor{Nora Belrose}{eai}
+\icmlauthor{Alice Rigg}{eai}
+\icmlauthor{Lucia Quirke}{eai}
+\icmlauthor{Adam Scherlis}{eai}
+%\icmlauthor{}{sch}
+%\icmlauthor{}{sch}
+\end{icmlauthorlist}
+
+\icmlaffiliation{eai}{EleutherAI}
+
+\icmlcorrespondingauthor{Nora Belrose}{nora@eleuther.ai}
+
+% You may provide any keywords that you
+% find helpful for describing your paper; these are used to populate
+% the "keywords" metadata in the PDF but will not be shown in the document
+\icmlkeywords{Machine Learning, ICML}
+
+\vskip 0.3in
+]
+
+% this must go after the closing bracket ] following \twocolumn[ ...
+
+% This command actually creates the footnote in the first column
+% listing the affiliations and the copyright notice.
+% The command takes one argument, which is text to display at the start of the footnote.
+% The \icmlEqualContribution command is standard text for equal contribution.
+% Remove it (just {}) if you do not need this facility.
+
+%\printAffiliationsAndNotice{}  % leave blank if no need to mention equal contribution
+%\printAffiliationsAndNotice{\icmlEqualContribution} % otherwise use the standard text.
+
+\begin{abstract}
+
+\end{abstract}
+
+\section{Introduction}
+\label{introduction}
+
+
+\subsection{Motivation}
+
+Existing transformer interpretability methods mostly involve extracting interpretable signals from the latent state (e.g. probing, SAEs). These offer a limited, local perspective on the transformer's operation: they allow us to identify some features that are relevant to the computation for particular data points, but they also necessarily ignore other parts of the computation. 
+
+We investigate a new method for interpreting transformers: \emph{capacity scaling}. \citet{allen-zhuPhysicsLanguageModels2024} have shown an apparantly universal capacity of transformers to store 2 bits per parameter of information. This was measured with respect to a very simple data generating process; first a collection of names was uniformly sampled, then a set of facts for each name was uniformly sampled. We can try to measure the knowledge capacity of transformers with respect to more complex data generating processes, but it raises the question of which encoding scheme we should assume that the transformer uses.
+
+For example, suppose we have a dataset of latent 2-hop questions with answers (that is, strings of the form "What is Bob's boss's favourite colour? Blue"). Suppose that these questions pertain to an underlying database of names, relations and attributes where all relations and attributes are uniformly random. Optimally, the answers to a dataset of such questions can be encoded by:
+
+\begin{itemize}
+    \item Store the set of unique names
+    \item For each index into the set of unique names, store the set of relation and attribute values that hold for that name
+    \item Applying the two step lookup algorithm: first, look up the value of the relation of the given name, and then look up the value of the given attribute of the relation
+\end{itemize}
+
+Note that (optimally) each relation and attribute value is only stored once. However, because of their non-recurrent structure, it is unlikely that a transformer can get away with only storing each relation and attribute value once. If we imagine that the values are stored in a particular transformer layer, then if the first lookup happens in layer $n$, then next lookup must happen in some layer $m > n$, which would require that the values be stored in both layers $n$ and $m$. More generally, the two step lookup algorithm requires that the values for the first lookup are available before the second lookup can be performed, which seems to require that the values are stored twice. Note that "two step lookup" is not the only algorithm that can be used to answer two hop questions, and we don't know what the optimal algorithm implementable by a transformer is.
+
+\citet{wangGrokkedTransformersAre2024} found evidence for something resembling a two step lookup algorithm for answering latent two hop questions in transformers. Specifically, they found:
+
+\begin{itemize}
+    \item Supervised probes can extract the answers to the first hop of two hop questions in transformers trained to answer two hop questions 
+    \item Transformers trained to answer two hop questions fail to generalize to answering two hop questions in which both hops have only previously been seen in standalone one hop questions
+\end{itemize}
+
+The second point supports the two step lookup hypothesis because facts that are only seen in one hop questions do not need to be stored in two separate locations, and are therefore unable to be used by the two step lookup algorithm.
+
+However, these two pieces of information are not sufficient to prove that transformers use a two step lookup algorithm to answer latent two hop questions. For example, it could implement an ``interleaved lookup'' algorithm, where the first layer looks up $q_1$ bits of the first hop, the second layer looks up $q_2$ additional bits of the first hop first hop and $q_2$ bits of the second hop for each of the available first hop possibilities. Perhaps we are overlooking some other more efficient algorithm.
+
+We can look for independent evidence for the two step lookup hypothesis by measuring the capacity of transformers to learn to answer two hop questions. If a transformer of a given size is close to half as efficient at learning two hop questions as it is at learning one hop questions, then this would support the two step lookup hypothesis (though it would not prove it true), while if a transformer was more efficient than this, we would have to consider alternative explanations.
+
+TODO - plausibility argument for why similar scaling ~ similar generalization properties? So even if we don't get the exact algorithm, capacity equivalence could be useful.
+
+We investigated two hop reasoning as a proof of concept for capacity based investigation of transformers. However, we encountered difficulties measuring the knowledge capacity of transformers given nontrivial data generating processes. For such data, transformers will typically initially learn a mix of naive but inefficient algorithms and more efficient algorithms (which may be slower to learn). The problem that arises is that, before the transformer has thoroughly learned the more efficient algorithm, its capacity is exhausted by the combination of the naive and efficient encoding it has already learned. At the capacity limit, gradient steps are opposed, so any improvement to the naive algorithm is undone by improvements to the efficient algorithm and vise-versa. This leads to very slow learning, to the point where we have not been able to train models to learn two hop reasoning if their capacity is less than double the capacity of the models that can learn one hop reasoning on an equivalent datase, which is a necessary condition to meeasure the knowledge capacity of transformers.
+
+
+Submission to ICML 2024 will be entirely electronic, via a web site
+(not email). Information about the submission process and \LaTeX\ templates
+are available on the conference web site at:
+\begin{center}
+\textbf{\texttt{http://icml.cc/}}
+\end{center}
+
+The guidelines below will be enforced for initial submissions and
+camera-ready copies. Here is a brief summary:
+\begin{itemize}
+\item Submissions must be in PDF\@. 
+\item \textbf{New to this year}: If your paper has appendices, submit the appendix together with the main body and the references \textbf{as a single file}. Reviewers will not look for appendices as a separate PDF file. So if you submit such an extra file, reviewers will very likely miss it.
+\item Page limit: The main body of the paper has to be fitted to 8 pages, excluding references and appendices; the space for the latter two is not limited. For the final version of the paper, authors can add one extra page to the main body.
+\item \textbf{Do not include author information or acknowledgements} in your
+    initial submission.
+\item Your paper should be in \textbf{10 point Times font}.
+\item Make sure your PDF file only uses Type-1 fonts.
+\item Place figure captions \emph{under} the figure (and omit titles from inside
+    the graphic file itself). Place table captions \emph{over} the table.
+\item References must include page numbers whenever possible and be as complete
+    as possible. Place multiple citations in chronological order.
+\item Do not alter the style template; in particular, do not compress the paper
+    format by reducing the vertical spaces.
+\item Keep your abstract brief and self-contained, one paragraph and roughly
+    4--6 sentences. Gross violations will require correction at the
+    camera-ready phase. The title should have content words capitalized.
+\end{itemize}
+
+\subsection{Submitting Papers}
+
+\textbf{Paper Deadline:} The deadline for paper submission that is
+advertised on the conference website is strict. If your full,
+anonymized, submission does not reach us on time, it will not be
+considered for publication. 
+
+\textbf{Anonymous Submission:} ICML uses double-blind review: no identifying
+author information may appear on the title page or in the paper
+itself. \cref{author info} gives further details.
+
+\textbf{Simultaneous Submission:} ICML will not accept any paper which,
+at the time of submission, is under review for another conference or
+has already been published. This policy also applies to papers that
+overlap substantially in technical content with conference papers
+under review or previously published. ICML submissions must not be
+submitted to other conferences and journals during ICML's review
+period.
+%Authors may submit to ICML substantially different versions of journal papers
+%that are currently under review by the journal, but not yet accepted
+%at the time of submission.
+Informal publications, such as technical
+reports or papers in workshop proceedings which do not appear in
+print, do not fall under these restrictions.
+
+\medskip
+
+Authors must provide their manuscripts in \textbf{PDF} format.
+Furthermore, please make sure that files contain only embedded Type-1 fonts
+(e.g.,~using the program \texttt{pdffonts} in linux or using
+File/DocumentProperties/Fonts in Acrobat). Other fonts (like Type-3)
+might come from graphics files imported into the document.
+
+Authors using \textbf{Word} must convert their document to PDF\@. Most
+of the latest versions of Word have the facility to do this
+automatically. Submissions will not be accepted in Word format or any
+format other than PDF\@. Really. We're not joking. Don't send Word.
+
+Those who use \textbf{\LaTeX} should avoid including Type-3 fonts.
+Those using \texttt{latex} and \texttt{dvips} may need the following
+two commands:
+
+{\footnotesize
+\begin{verbatim}
+dvips -Ppdf -tletter -G0 -o paper.ps paper.dvi
+ps2pdf paper.ps
+\end{verbatim}}
+It is a zero following the ``-G'', which tells dvips to use
+the config.pdf file. Newer \TeX\ distributions don't always need this
+option.
+
+Using \texttt{pdflatex} rather than \texttt{latex}, often gives better
+results. This program avoids the Type-3 font problem, and supports more
+advanced features in the \texttt{microtype} package.
+
+\textbf{Graphics files} should be a reasonable size, and included from
+an appropriate format. Use vector formats (.eps/.pdf) for plots,
+lossless bitmap formats (.png) for raster graphics with sharp lines, and
+jpeg for photo-like images.
+
+The style file uses the \texttt{hyperref} package to make clickable
+links in documents. If this causes problems for you, add
+\texttt{nohyperref} as one of the options to the \texttt{icml2024}
+usepackage statement.
+
+
+\subsection{Submitting Final Camera-Ready Copy}
+
+The final versions of papers accepted for publication should follow the
+same format and naming convention as initial submissions, except that
+author information (names and affiliations) should be given. See
+\cref{final author} for formatting instructions.
+
+The footnote, ``Preliminary work. Under review by the International
+Conference on Machine Learning (ICML). Do not distribute.'' must be
+modified to ``\textit{Proceedings of the
+$\mathit{41}^{st}$ International Conference on Machine Learning},
+Vienna, Austria, PMLR 235, 2024.
+Copyright 2024 by the author(s).''
+
+For those using the \textbf{\LaTeX} style file, this change (and others) is
+handled automatically by simply changing
+$\mathtt{\backslash usepackage\{icml2024\}}$ to
+$$\mathtt{\backslash usepackage[accepted]\{icml2024\}}$$
+Authors using \textbf{Word} must edit the
+footnote on the first page of the document themselves.
+
+Camera-ready copies should have the title of the paper as running head
+on each page except the first one. The running title consists of a
+single line centered above a horizontal rule which is $1$~point thick.
+The running head should be centered, bold and in $9$~point type. The
+rule should be $10$~points above the main text. For those using the
+\textbf{\LaTeX} style file, the original title is automatically set as running
+head using the \texttt{fancyhdr} package which is included in the ICML
+2024 style file package. In case that the original title exceeds the
+size restrictions, a shorter form can be supplied by using
+
+\verb|\icmltitlerunning{...}|
+
+just before $\mathtt{\backslash begin\{document\}}$.
+Authors using \textbf{Word} must edit the header of the document themselves.
+
+\section{Analytic Derivation}
+
+Consider an MLP with a single hidden layer,
+\begin{align}
+    f(\xx) = \mathbf{W}_2\phi(\mathbf{W}_1\xx + \mathbf{b}_1)
+\end{align}
+where $\phi$ denotes some elementwise nonlinearity.
+
+We are interested in computing the ordinary least squares coefficients $\bbeta^* \in \R^{d \times k}$ and intercept $\aalpha^* \in \R^k$ that satisfy
+\begin{align}\label{eq:ols-problem}
+\mathop{\mathrm{argmin}}_{\substack{(\bbeta, \aalpha)}} \mathop{\E}_{\substack{\xx \sim \mathcal{N}(\mmu, \SSigma)}} \| \bbeta \xx + \aalpha - f(\xx) \|^2_2
+\end{align}
+for some mean $\mmu$ and p.s.d. covariance matrix $\SSigma$.\footnote{The assumption of Gaussianity can be relaxed somewhat, since any input distribution with i.i.d. components (in some basis) will yield approximately Gaussian preactivations by the Central Limit Theorem. The uniform distribution on $[0, 1]^d$ is a notable example.} It is well known that Eq.~$\ref{eq:ols-problem}$ has the solution
+\begin{align}
+    \bbeta^* &= \SSigma^{-1} \big ( \E [\xx f(\xx)^T] - \mmu \E [f(\xx)]^T \big ) \\
+    \aalpha^* &= \E[ f(\xx) ] - \bbeta^T \mmu
+\end{align}
+Luckily, for many common nonlinearities we can compute the integrals $\E[f(\xx)]$ and $\E [\xx f(\xx)^T]$ analytically. This is because, given that the input $\xx$ is Gaussian, the preactivations $\yy$ are also Gaussian with mean $\mmu_{\yy} = \mathbf{W}_1\mmu + \mathbf{b}_1$ and covariance $\SSigma_{\yy} = \mathbf{W}_1\SSigma\mathbf{W}_1^T$. It will be convenient to reparametrize $\xx := \SSigma^{1/2}\zz + \mmu$ and $\yy := \SSigma_{\yy}^{1/2}\zz + \mmu_{\yy}$ where $\zz \sim \mathcal{N}(\boldsymbol{0}, \II)$, so that we need only deal with the PDF and CDF of the standard normal distribution. By linearity, we can pull $\mathbf{W}_2$ out of the expectation, and leaving us with:
+\begin{align}
+    \E[f(\xx)] &= \mathbf{W}_2 \mathop{\E}_{\zz} [\phi(\SSigma_{\yy}^{1/2}\zz + \mmu_{\yy})]\label{eq:avg} \\
+    \E[x f(\xx)^T] &= \mathop{\E}_{\zz} [(\SSigma^{1/2} \zz + \mmu) \phi(\SSigma_{\yy}^{1/2}\zz + \mmu_{\yy})^T] \mathbf{W}_2^T\label{eq:cross-cov}
+\end{align}
+Since $\phi$ acts elementwise, we may solve the integral elementwise, disregarding correlations among 
+preactivations. Without loss of generality, let $\mathbf{W}_2 = \II$. Then for each component $i$ of Eq.~\ref{eq:avg}, we have
+\begin{equation}
+    \E[f(\xx)]_i = \int_{-\infty}^\infty \phi \big (\sigma_i \zz_i + (\mmu_{\yy})_i \big ) \varphi(\zz_i) d\zz_i,
+\end{equation}
+where $\varphi$ is the standard normal PDF, and $\sigma_i$ denotes the Euclidean norm of the $i$\textsuperscript{th} row of $\SSigma_{\yy}^{1/2}$, which is the standard deviation of $\yy_i$. %The same strategy readily applies to Eq.~\ref{eq:cross-cov}.
+
+The details now depend on the specific choice of nonlinearity $\phi$; see Appendix
+
+\subsection{Examples}
+
+When $\phi = \mathrm{ReLU}$ and $\mmu = 0$, $\SSigma = \mathbf{I}$, we get
+\begin{align}
+    \bbeta^* = \mathbf{W}_2 \:\mathrm{diag} \Big [ \Pphi \Big ( \mathbf{b}_1 \odot \| (\mathbf{W}_1)_{i, \cdot} \|^{-1} \Big ) \Big ] \mathbf{W}_1 % \\
+    % \aalpha^* = \mathbf{W}_2 \Big [ \mathbf{b}_1 \odot \Pphi (\mathbf{b}_1 \odot \boldsymbol{s}^{-1} ) + \boldsymbol{s} \odot \varphi ( \mathbf{b}_1 \odot \boldsymbol{s}^{-1} ) \Big ]
+\end{align}
+where $\| (\mathbf{W}_1)_{i, \cdot} \|^{-1}$ is the vector whose components are the reciprocals of the norms of the rows of $\mathbf{W}_1$. The formula for arbitrary $\mmu$ and $\SSigma$ is more complex and can be found in Appendix~\ref{app:relu}.
+
+For GELU, ReLU, and Swish activation functions,\footnote{More generally, this holds for any activation function $\phi(x) = x \int_{-\infty}^{\infty} g(x) dx$ for some even function $g$.} when $\mathbf{b}_1 = \boldsymbol{0}$, the optimal coefficients are given by the highly intuitive expression
+\begin{equation}
+    \bbeta^* = \frac{1}{2} \mathbf{W}_2 \mathbf{W}_1.
+\end{equation}
+
+\subsection{Extension to Polynomials}
+
+We can use the same basic strategy to compute least-squares polynomial approximants for $f$.
+
+% Acknowledgements should only appear in the accepted version.
+\section*{Acknowledgements}
+
+\textbf{Do not} include acknowledgements in the initial version of
+the paper submitted for blind review.
+
+If a paper is accepted, the final camera-ready version can (and
+usually should) include acknowledgements.  Such acknowledgements
+should be placed at the end of the section, in an unnumbered section
+that does not count towards the paper page limit. Typically, this will 
+include thanks to reviewers who gave useful comments, to colleagues 
+who contributed to the ideas, and to funding agencies and corporate 
+sponsors that provided financial support.
+
+\section*{Impact Statement}
+
+This paper presents work whose goal is to advance the field of 
+Machine Learning. There are many potential societal consequences 
+of our work, none which we feel must be specifically highlighted here.
+
+
+% In the unusual situation where you want a paper to appear in the
+% references without citing it in the main text, use \nocite
+\nocite{langley00}
+
+\bibliography{example_paper}
+\bibliographystyle{icml2024}
+
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+% APPENDIX
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+\newpage
+\appendix
+\onecolumn
+\section{Master theorem}
+
+Consider a collection of $n + 1$ jointly Gaussian random variables $\{ X \} \cup \{ Y_1, \ldots, Y_n \}$. We are interested in computing the expectation $\E[g(X) \prod_{i = 1}^{n} Y_i]$ for some function $g : \R \rightarrow \R$. We begin by rewriting the $Y_i$ in terms of their conditional expectations on $X$:
+\begin{align}\label{eq:setup}
+    \E \Big [g(X) \prod_{i = 1}^{n} Y_i \Big ] &= \E \Big [ g(X) \prod_{i = 1}^{n} \big ( \E[Y_i | X] + \epsilon_i \big ) \Big ] = \E \Big [ g(X) \prod_{i = 1}^{n} \big ( \alpha_i X + \beta_i + \epsilon_i \big ) \Big ],
+\end{align}
+where $\alpha_i$ and $\beta_i$ are the ordinary least squares coefficients and intercepts, respectively, for regressing $Y_i$ on $X$.\footnote{Here we assume $\mathrm{Var}(X) > 0$, so that these coefficients are well-defined. If $\mathrm{Var}(X) = 0$, then $g(X)$ is almost surely constant, and hence we can write our expectation as $\E[g(X)] \E[\prod_{i = 1}^{n} Y_i]$ and apply Isserlis' theorem to evaluate $\E[\prod_{i = 1}^{n} Y_i]$.}
+
+This leaves us with $g(X)$ times a polynomial in $X$. We will compute the coefficients of this polynomial using a combinatorial argument. First let $S$ be the set of $n$-tuples such that the $i$\textsuperscript{th} entry of each tuple is chosen from $\{ \alpha_i X, \beta_i, \epsilon_i \}$.
+\begin{equation}
+    S = \prod_{i = 1}^n \{ \alpha_i X, \beta_i, \epsilon_i \} = \big \{ ( d_1, \ldots, d_n) \:|\: \forall i : d_i \in \{ \alpha_i X, \beta_i, \epsilon_i \} \big \}
+\end{equation}
+Let $\mathrm{prod}(s)$ denote the product of the elements of a tuple $s$. By the distributive property, we can expand our polynomial into a sum of $3^n$ terms, one for each element of $S$:
+\begin{equation}\label{eq:distributive}
+    \prod_{i = 1}^{n} \big ( \alpha_i X + \beta_i + \epsilon_i \big ) = \sum_{s \in S} \mathrm{prod}(s).
+\end{equation}
+Now fix some integer $k \leq n$. To compute the polynomial coefficient $a_k$ corresponding to $X^k$, we must sum together all the terms in Eq.~\ref{eq:distributive} which contain precisely $k$ factors drawn from $A = \{ \alpha_1, \ldots \alpha_n \}$. Let $C(A, k)$ denote the set of combinations (represented as sorted $k$-tuples) of the elements of $A$, so that $|C(A, k)| = \binom{n}{k}$,\footnote{By construction, the elements of the tuples in $S$ are sorted in ascending order by subscript, so there are only $\binom{n}{k}$ ways for an $\alpha$ factor to appear $k$ times in a term. Since multiplication is commutative, the actual ordering of elements in each tuple is a matter of indifference.} and let $I(c)$ denote the set of indices used in a combination $c$, for example $I ( ( \alpha_2, \alpha_4 ) ) = \{ 2, 4 \}$. Then we have
+\begin{equation}\label{eq:poly-coef}
+    a_k = \sum_{c \in C(A, k)} \mathrm{prod}(c) \sum_{s \in S_{-\alpha}(c)}  \mathrm{prod}(s),
+\end{equation}
+where we define $S_{-\alpha}(c)$ to be the set of tuples of length $n - k$ whose $i$\textsuperscript{th} element is drawn from $\{ \beta_i, \epsilon_i \}$
+\begin{equation}
+    S_{-\alpha}(c) := \prod_{i = 1}^n \{ \beta_i, \epsilon_i \} = \big \{ ( d_1, \ldots, d_n) \:|\: \forall i \notin I(c) : d_i \in \{ \beta_i, \epsilon_i \} \big \}.
+\end{equation}
+Plugging Eq.~\ref{eq:poly-coef} into Eq.~\ref{eq:setup} yields
+\begin{align}
+    \E \Big [g(X) \prod_{i = 1}^{n} Y_i \Big ] &= \E \Big [ \sum_{k = 0}^{n} \sum_{c \in C(A, k)} \mathrm{prod}(c) \sum_{s \in S_{-\alpha}(c)}  \mathrm{prod}(s) g(X) X^k \Big ]\\
+    &= \sum_{k = 0}^{n} \Big ( \sum_{c \in C(A, k)} \mathrm{prod}(c) \sum_{s \in S_{-\alpha}(c)} \E[ \mathrm{prod}(s) ] \Big ) \E \big [ g(X) X^k \big ],
+\end{align}
+where we have pulled $\mathrm{prod}(c)$ out since it is a constant for each $c$, and we have pulled out $\E[ \mathrm{prod}(s) ]$ since $\mathrm{prod}(s)$ is either a constant (some product of $\beta$ factors) or a random variable independent of $X$ (if it contains any $\epsilon$ factors).
+
+In general, $\E[ \mathrm{prod}(s) ]$ is proportional to the expected product of a (possibly empty) set of zero mean, jointly Gaussian variables $\epsilon_j\in s$. It can therefore be evaluated using Isserlis' theorem, which states
+\begin{align}
+    \E \Big [ \prod_{j = 1}^{n} \epsilon_j \Big ] &= \sum_{p \in P^2_{n}} \prod_{\{i, j\} \in p} \mathrm{Cov}(\epsilon_i, \epsilon_j),
+\end{align}
+where $p$ ranges over all possible partitions of the residuals into pairs.\footnote{When $n - 1$ is odd, the expectation is zero, since it is impossible to partition a set of odd cardinality into pairs.} The covariance between any two residuals $\epsilon_i$, $\epsilon_j$ is
+\begin{align}
+    \mathrm{Cov}(\epsilon_i, \epsilon_j) &= \mathrm{Cov} \Big [ \alpha_i X + \beta_i - X_i, \alpha_j X + \beta_j - X_j \Big ] \\
+    &= \alpha_i \alpha_j \mathrm{Var}(X) - \alpha_i \mathrm{Cov}(X, X_j) - \alpha_j \mathrm{Cov}(X, X_i) + \mathrm{Cov}(X_i, X_j) \\
+    &= \mathrm{Cov}(X_i, X_j) - \alpha_i \alpha_j \mathrm{Var}(X) \\
+    &= \mathrm{Cov}(X_i, X_j) - \mathrm{Cov}(X, X_i) \mathrm{Cov}(X, X_i) \mathrm{Var}(X)^{-1}.
+\end{align}
+When $n = 2$, this simplifies to
+\begin{align}
+    \E \Big [g(Y) X_1 X_2 \Big ] = 
+\end{align}
+% where we have dropped the residual terms $\epsilon_i$ since they are zero mean and are independent of all other terms.
+
+Our expression now has the form
+\begin{align}
+    \E \Big [g(X) \prod_{i = 1}^{n} Y_i \Big ] = \sum_{k = 1}^{n - 1} a_k \E [ g(X) X^k ],
+\end{align}
+where the coefficients $a_k$ can be computed analytically using the combinatorial strategy explained above.
+
+The  expression is a univariate integral which can be efficiently evaluated using numerical integration techniques such as \href{https://en.wikipedia.org/wiki/Gauss%E2%80%93Hermite_quadrature}{Gauss-Hermite quadrature}. For some choices of $g$, such as GELU and ReLU, closed form solutions are available.
+
+\subsection{Extension of Stein's lemma}
+
+If desired, each term $\E [ g(X) X^k ]$ can be reduced to a linear combination of expectations of the form $\E [ g^{(n)}(X) ]$, where $g^{(n)}$ denotes the $n$\textsuperscript{th} derivative of $g$. We begin by rewriting the expectation as a sum of Gaussian integrals:
+%We assume the ability to evaluate $\E[g(x)]$, and we can evaluate $\E[g(x) x]$ using Stein's lemma. For terms of the form $\E[g(x) x^k]$ with $k > 1$, we can recursively apply integration by parts.
+\begin{align}
+    \E[g(X) X^k] &= \int_{-\infty}^{\infty} g(\mu + \sigma z) (\mu + \sigma z)^k \varphi (z) dz \\
+    &= \sum_{j = 0}^k \binom{k}{j} \mu^j \sigma^{k - j} \int_{-\infty}^{\infty} g(\mu + \sigma z) z^{k - j} \varphi(z) dz,
+    %&= \sum_{j = 0}^k \binom{k}{j} \mu^j \sigma^{k - j} \Big ( \Big [ g(\mu + \sigma z) (z^{k - j}\Pphi(z) - (k - j) \int_{-\infty}^{z} z^{k - j - 1} \Pphi(z) dz) \Big ]_{-\infty}^{\infty} - \int_{-\infty}^{\infty} \frac{d}{dz} g(\mu + \sigma z) \int z^{k - j} \varphi(z) dz dz \Big )
+\end{align}
+where we have applied the binomial theorem to expand $(\mu + \sigma z)^k$. We will evaluate these integrals recursively. Consider the base case where $j = k$. Then we have
+\begin{equation}\label{eq:zeroth-order}
+    \cancel{\binom{k}{0}\sigma^0} \mu^k \int_{-\infty}^{\infty} g(\mu + \sigma z) \cancel{z^0} \varphi(z) dz = \mu^k \E [ g(x) ].
+\end{equation}
+For $j = k - 1$, we have
+\begin{align}\label{eq:first-order}
+    \int_{-\infty}^{\infty} \underbrace{g(\mu + \sigma z)}_{u} \underbrace{z \varphi(z)}_{dv} dz &= \cancel{[-g(\mu + \sigma z) \varphi(z)]_{-\infty}^{\infty}} + \sigma \int_{-\infty}^{\infty} \varphi(z) g'(\mu + \sigma z) dz = \sigma \E[g'(x)],
+\end{align}
+where we have used the fact that $\int_{-\infty}^{z} z \varphi(z) dz = -\varphi(z)$.
+
+Let $n = k - j$. In the general case we can apply integration by parts to get
+\begin{align}\label{eq:general}
+    \int_{-\infty}^{\infty} \underbrace{g(\mu + \sigma z)}_{u} \underbrace{z^n \varphi(z)}_{dv} dz &= \lim_{a \rightarrow -\infty} \lim_{b \rightarrow \infty} \Big [ [u(b) v(b) - u(a) v(a)] - \int_{a}^{b} \underbrace{\sigma g'(\mu + \sigma z)}_{du} v(z) dz \Big ],
+\end{align}
+where $v$ is the antiderivative of $z^n \varphi(z)$. \citet{owen1980table}'s integral table tells us that
+\begin{equation}\label{eq:int-gaussian-poly}
+    v(z) = \int_{-\infty}^{z} z^n \varphi(z) = \mathbf{1}_{\text{even}}(n) (n - 1)!! \Pphi(z) - \sum_{m\text{ odd}}^n \frac{(n - 1)!!}{(n - m)!!} z^{n - m} \varphi(z),
+\end{equation}
+where $\mathbf{1}_{\text{even}}(n)$ is an indicator function for $n$ being even. Since the Gaussian CDF and PDF in Eq.~\ref{eq:int-gaussian-poly} tend rapidly to zero as their arguments tend to $-\infty$, we can now cancel the $u(a)v(a)$ term in Eq.~\ref{eq:general}.
+
+Plugging Eq.~\ref{eq:int-gaussian-poly} into the inner integral in Eq.~\ref{eq:general} yields
+\begin{align}
+    \int_{a}^{b} g'(\mu + \sigma z) v(z) dz &= \int_{a}^{b} g'(\mu + \sigma z) \Big [ \mathbf{1}_{\text{even}}(n) (n - 1)!! \Pphi(z) - \sum_{m\text{ odd}}^n \frac{(n - 1)!!}{(n - m)!!} z^{n - m} \varphi(z) \Big ] dz \\
+    &= \mathbf{1}_{\text{even}}(n) (n - 1)!! \int_{a}^{b} g'(\mu + \sigma z) \Pphi(z) dz - \sum_{m\text{ odd}}^n \frac{(n - 1)!!}{(n - m)!!} \int_{a}^{b} g'(\mu + \sigma z) z^{n - m} \varphi(z) dz.\label{eq:inner-integral}
+\end{align}
+%Note that the right-hand integral in the above expression is clearly an instance of Eq.~\ref{eq:general}, except that $g$ has been replaced with $g'$. We can therefore evaluate it via recursion until we reach something of the form Eq.~\ref{eq:first-order}.
+We can evaluate the left-hand integral via integration by parts: 
+\begin{align}\label{eq:endpoint}
+    \int_{a}^{b} \underbrace{\Pphi(z)}_{u} \underbrace{g'(\mu + \sigma z)}_{dv} dz &= \Big [ \underbrace{\Pphi(b)}_{u} \underbrace{\sigma^{-1} g(\mu + \sigma b)}_{v} - \cancel{\Pphi(a) \sigma^{-1} g(\mu + \sigma a)} \Big ] - \int_{a}^{b} \underbrace{\sigma^{-1} g(\mu + \sigma z)}_{v} \underbrace{\varphi(z)}_{du} dz \\
+    &= \sigma^{-1} \Big [ \Pphi(b) g(\mu + \sigma b) - \int_{a}^{b} g(\mu + \sigma z) \varphi(z) \Big ]
+\end{align}
+\subsubsection{Even case}
+First assume that $n$ is even. Plugging Eq.~\ref{eq:endpoint} into Eq.~\ref{eq:inner-integral} 
+
+\subsection{Linear case}
+
+First consider the case where $k = 1$. In this case, in each partition there is a single block $B_X$ that contains a copy of $X$. We can pull it out of the product:
+\begin{equation}
+    \E[X f(Y)] = \sum_{n = 0}^{\infty} \frac{f^{(n)}(0)}{n!} \sum_{\pi} \kappa \big ( X, Y_{(i)} : i \in B_X \big ) \prod_{B \in \pi, X \notin B} \kappa \big ( Y_{(i)} : i \in B \big )
+\end{equation}
+Because cumulants of order greater than two vanish, the partitions where the term $\kappa \big ( X, Y_{(i)} : i \in B_X \big )$ is nonzero must contain a block of the form $\{ X, Y_{(j)} \}$ for some $j \in 1 \ldots n$, or the singleton block $\{ X \}$. The total contribution of the partitions containing $\{ X \}$ takes the form
+\begin{equation}
+    \kappa(X) \sum_{\pi \in \Pi(1 \ldots n)} \prod_{B \in \pi} \kappa \big ( Y_{(i)} : i \in B \big ) = \E[X] E[Y^n],
+\end{equation}
+where we have simplified using Eq.~\ref{eq:moment-cumulant}. The total contribution of the partitions containing $\{ X, Y_{(j)} \}$ takes the form
+\begin{align}
+    \kappa \big ( X, Y \big ) \sum_{j \in 1 \ldots n} \sum_{\pi \in \Pi(1 \ldots n) \setminus j} \prod_{B \in \pi} \kappa \big ( Y_{(i)} : i \in B \big ) &= n \kappa \big ( X, Y \big ) \sum_{\pi \in \Pi(1 \ldots n - 1)} \prod_{B \in \pi} \kappa \big ( Y_{(i)} : i \in B \big ) \\
+    &= n \mathrm{Cov} \big ( X, Y \big ) \E \big [ Y^{n - 1} \big ],
+\end{align}
+where we again have made use of Eq.~\ref{eq:moment-cumulant} to convert cumulants to moments. We now have
+\begin{align}
+    \E[X f(Y)] &= \sum_{n = 0}^{\infty} \frac{f^{(n)}(0)}{n!} \Big ( \E[X] E[Y^n] + n \mathrm{Cov} \big ( X, Y \big ) \E \big [ Y^{n - 1} \big ] \Big ) \\
+    &= \E[X] \sum_{n = 0}^{\infty} \frac{f^{(n)}(0)}{n!} E[Y^n] + n \mathrm{Cov} \big ( X, Y \big ) \sum_{n = 0}^{\infty} \frac{f^{(n)}(0)}{n!} \E \big [ Y^{n - 1} \big ] \\
+    & = \E[X] \E[f(Y)] + \mathrm{Cov} \big ( X, Y \big ) \E[f'(Y)],
+\end{align}
+where $f'$ denotes the first derivative of $f$.
+
+\subsection{Quadratic case}
+
+For $k = 2$ we proceed similarly. First consider all partitions containing the block $\{ X_{(1)}, X_{(2)} \}$. For each such partition, all other blocks only contain copies of $Y$, not $X$. The total contribution of these partitions is
+\begin{align}
+    \kappa \big ( X, X \big ) \sum_{\pi \in \Pi(1 \ldots n)} \prod_{B \in \pi} \kappa \big ( Y_{(i)} : i \in B \big ) = \mathrm{Var}(X) \E[Y^n].
+\end{align}
+
+Now consider partitions containing both the singleton blocks $\{ X_{(1)} \}$ and $\{ X_{(2)} \}$. The total contribution of these partitions is
+\begin{align}
+    \kappa \big ( X \big )^2 \sum_{\pi \in \Pi(1 \ldots n)} \prod_{B \in \pi} \kappa \big ( Y_{(i)} : i \in B \big ) = \E(X)^2 \E[Y^n],
+\end{align}
+and combined with the previous group of partitions we get $\E[X^2] \E[Y^n]$.
+
+Now consider partitions containing either $\{ X_{(1)} \}$ and $\{ X_{(2)}, Y_{(j)} \}$, or $\{ X_{(2)} \}$ and $\{ X_{(1)}, Y_{(j)} \}$ for some $j \in 1 \ldots n$. The total contribution of these partitions is
+\begin{align}
+    2n \kappa \big ( X \big ) \kappa \big ( X, Y \big ) \sum_{j \in 1 \ldots n} \sum_{\pi \in \Pi(1 \ldots n) \setminus j} \prod_{B \in \pi} \kappa \big ( Y_{(i)} : i \in B \big ) &= 2n \kappa \big ( X \big ) \kappa \big ( X, Y \big ) \sum_{\pi \in \Pi(1 \ldots n - 1)} \prod_{B \in \pi} \kappa \big ( Y_{(i)} : i \in B \big ) \\
+    &= 2n \E[X] \mathrm{Cov} \big ( X, Y \big ) \E \big [ Y^{n - 1} \big ].
+\end{align}
+
+Finally, consider partitions containing both $\{ X_{(1)}, Y_{(j)} \}$ and $\{ X_{(2)}, Y_{(j')} \}$ for $j, j' \in 1 \ldots n$, $j \neq j'$. The total contribution of these partitions is
+\begin{align}
+    n(n - 1) \kappa \big ( X, Y \big )^2 \sum_{\pi \in \Pi(1 \ldots n - 2)} \prod_{B \in \pi} \kappa \big ( Y_{(i)} : i \in B \big ) = n(n - 1) \mathrm{Cov} \big ( X, Y \big )^2 \E \big [ Y^{n - 2} \big ].
+\end{align}
+
+Bringing it all together, we have
+\begin{align}
+    \E[X^2 f(Y)] &= \sum_{n = 0}^{\infty} \frac{f^{(n)}(0)}{n!} \Big ( \E[X^2] \E[Y^n] + \mathrm{Cov} \big ( X, Y \big ) \big [ 2n \E[X] \E \big [ Y^{n - 1} \big ] +  n(n - 1) \mathrm{Cov} \big ( X, Y \big ) \E \big [ Y^{n - 2} \big ] \big ] \Big ) \\
+    &= \E[X^2] \E[f(Y)] + \mathrm{Cov} \big ( X, Y \big ) \sum_{n = 0}^{\infty} \frac{f^{(n)}(0)}{n!} \big [ 2n \E[X] \E \big [ Y^{n - 1} \big ] +  n(n - 1) \mathrm{Cov} \big ( X, Y \big ) \E \big [ Y^{n - 2} \big ] \big ] \\
+    &= \E[X^2] \E[f(Y)] + 2 \E[X] \mathrm{Cov} \big ( X, Y \big ) \E[f'(Y)] + \mathrm{Cov} \big ( X, Y \big )^2 \sum_{n = 0}^{\infty} n(n - 1) \frac{f^{(n)}(0)}{n!} \E \big [ Y^{n - 2} \big ] \\
+    &= \E[X^2] \E[f(Y)] + 2 \E[X] \mathrm{Cov} \big ( X, Y \big ) \E[f'(Y)] + \mathrm{Cov} \big ( X, Y \big )^2 \E[f''(Y)]
+\end{align}
+
+\subsection{General case}
+
+For $k > 2$ we generalize the approach taken in the quadratic case. First consider all ``segregated'' partitions that lack any block containing both a copy of $X$ and a copy of $Y$. The total contribution of these partitions is
+\begin{align}
+    \sum_{\pi_X \in \Pi(1 \ldots k)} \sum_{\pi_Y \in \Pi(1 \ldots n)} \Big [ \prod_{B_X \in \pi_X} \kappa \big ( X_{(i)} : i \in B \big ) \Big ] \Big [ \prod_{B_Y \in \pi_Y} \kappa \big ( Y_{(i)} : i \in B \big ) \Big ] = \E[X^k] \E[Y^n].
+\end{align}
+Now consider partitions where exactly $j$ copies of $X$ are paired with $j$ copies of $Y$, with the remaining $k - j$ copies of $X$ and $n - j$ copies of $Y$ either in singleton blocks, or in pairs of the form $\{ X_{(i)}, X_{(i')} \}$ or $\{ Y_{(i)}, Y_{(i')} \}$  (since any higher-order cumulants vanish). The total number of ways to pair $j$ copies of $X$ with $j$ copies of $Y$ is $\binom{k}{j} \binom{n}{j} j!$ and each of the $j!$ permutations will result in the same product of covariances. The total contribution of these partitions is then:
+\begin{align}
+    \binom{k}{j} \mathrm{Cov}(X, Y)^j \E[X^{k - j}] \E[Y^{n - j}] \frac{n!}{(n - j)!}
+\end{align}
+
+Putting it all together, we have
+\begin{equation}
+    \E[X^k f(Y)] = \sum_{j = 0}^k \binom{k}{j} \E[X^{k - j}] \mathrm{Cov}(X, Y)^j \E[f^{(j)}(Y)].
+\end{equation}
+
+\subsection{Gaussian Linear Unit (GELU)}
+
+Recall that the GELU activation function is defined as $x \Pphi(x)$, where $\Pphi$ denotes the standard normal CDF. This allows us to employ known results from integral tables.
+
+\subsubsection{Identities}
+
+We will make use of the identity
+
+\subsubsection{Mean}
+
+Specifically we can make use of the identity
+\begin{equation}
+    \int_{-\infty}^{\infty} x \Pphi(a + bx) \varphi(x) dx = \frac{b}{\sqrt{1 + b^2}} \varphi \Big (\frac{a}{\sqrt{1 + b^2}} \Big )
+\end{equation}
+from \citet{owen1980table} to show that
+\begin{align}
+    \E_x [\mathrm{GELU}(x)] &= \int_{-\infty}^{\infty} (\mu + \sigma z) \Pphi(\mu + \sigma z) \varphi(z) dz \\
+    &= \mu \int_{-\infty}^{\infty} \Pphi(\mu + \sigma z) \varphi(z) dz + \sigma \int_{-\infty}^{\infty} z \Pphi(\mu + \sigma z) \varphi(z) dz \\
+    &= \mu \Pphi \Big ( \frac{\mu}{\sqrt{1 + \sigma^2}} \Big ) + \frac{\sigma^2}{\sqrt{1 + \sigma^2}} \varphi \Big ( \frac{\mu}{\sqrt{1 + \sigma^2}} \Big ).
+\end{align}
+
+\subsubsection{Derivative}
+
+By the product rule, the first and second derivatives of GELU are
+\begin{align}
+    \frac{d}{dx} \mathrm{GELU}(x) &= \frac{d}{dx} \Big [ x \Pphi(x) \Big ] = \Pphi(x) + x \varphi(x) \\
+    \frac{d^2}{dx^2} \mathrm{GELU}(x) &= 2 \varphi(x) + x \varphi'(x) = (2 - x^2) \varphi(x).
+\end{align}
+The expected derivative under $\mathcal{N}(\mu, \sigma)$ is then
+\begin{align*}
+    \E_x [\mathrm{GELU}'(x)] &= \int_{-\infty}^{\infty} \Pphi(\mu + \sigma z) \varphi(z) dz + \int_{-\infty}^{\infty} (\mu + \sigma z) \varphi(\mu + \sigma z) \varphi(z) dz \\
+    &= \Pphi \Big ( \frac{\mu}{\sqrt{1 + \sigma^2}} \Big ) + \mu \int_{-\infty}^{\infty} \varphi(\mu + \sigma z) \varphi(z) dz + \sigma \int_{-\infty}^{\infty} z \varphi(\mu + \sigma z) \varphi(z) dz \\
+    &= \Pphi \Big ( \frac{\mu}{\sqrt{1 + \sigma^2}} \Big ) + \frac{\mu}{\sqrt{1 + \sigma^2}} \varphi \Big ( \frac{\mu}{\sqrt{1 + \sigma^2}} \Big ) - \sigma \varphi \Big ( \frac{\mu}{\sqrt{1 + \sigma^2}} \Big ) \frac{\mu \sigma}{(1 + \sigma^2)^{3/2}} \\
+    &= \Pphi \Big ( \frac{\mu}{\sqrt{1 + \sigma^2}} \Big ) + \varphi \Big ( \frac{\mu}{\sqrt{1 + \sigma^2}} \Big ) \Big [ \frac{\mu}{\sqrt{1 + \sigma^2}} - \frac{\mu \sigma^2}{(1 + \sigma^2)^{3/2}} \Big ].
+\end{align*}
+The expected second derivative under $\mathcal{N}(\mu, \sigma)$ is
+\begin{align}
+    \E_x [\mathrm{GELU}''(x)] &= \int_{-\infty}^{\infty} (2 - \mu^2 - 2 \mu \sigma z  - \sigma^2 z^2) \varphi(\mu + \sigma z) \varphi(z) dz \\
+    &= \frac{2 - \mu^2}{\sqrt{1 + \sigma^2}} \varphi \Big ( \frac{\mu}{\sqrt{1 + \sigma^2}} \Big ) - 2 \mu \sigma \int_{-\infty}^{\infty} z \varphi(\mu + \sigma z) \varphi(z) dz - \sigma^2 \int_{-\infty}^{\infty} z^2 \varphi(\mu + \sigma z) \varphi(z) dz \\
+    &= \varphi \Big ( \frac{\mu}{\sqrt{1 + \sigma^2}} \Big ) \Big [ \frac{2 - \mu^2}{\sqrt{1 + \sigma^2}} - \frac{2 \mu^2 \sigma^2}{(1 + \sigma^2)^{3/2}} - \frac{\mu^2 \sigma^2 + \sigma^2 + 1}{(1 + \sigma^2)^{5/2}} \Big ] %- \sigma^2 \int_{-\infty}^{\infty} z^2 \varphi(\mu + \sigma z) \varphi(z) dz.
+\end{align}
+To evaluate the leftmost integral, we can rewrite the product of Gaussian densities as follows:
+\begin{align}
+    \varphi(\mu + \sigma z) \varphi(z) &= \frac{1}{\sqrt{2 \pi}} \exp \Big ( -\frac{\mu^2}{2 \sigma^2 + 2} \Big ) \varphi \Big ( \frac{\mu \sigma}{\sqrt{1 + \sigma^2}} + \sqrt{1 + \sigma^2} z \Big ) \\
+    &= \varphi ( \frac{\mu}{\sqrt{\sigma^2 + 1}} )
+\end{align}
+Using an identity from \citet{owen1980table}, we get:
+\begin{equation}
+    \frac{\sigma^2}{\sqrt{2 \pi}} \exp \Big ( -\frac{\mu^2}{2 \sigma^2 + 2} \Big ) \frac{\mu^2 \sigma^2 + \sigma^2 + 1}{(\sigma^2 + 1)^{5/2}}.
+\end{equation}
+
+\subsection{Rectified Linear Unit (ReLU)}\label{app:relu}
+
+The piecewise linear nature of ReLU makes the derivation of integrals involving it fairly straightforward. Essentially, we need to compute the probability of landing in the positive part of the ReLU's domain, then compute a simple Gaussian integral over this part of the domain.
+
+\subsubsection{Mean}
+
+We begin with the expectation $\E_x [\mathrm{ReLU}(x)]$ for $x \sim \mathcal{N}(\mu, \sigma)$. We first reparametrize $x = \mu + \sigma z$ where $z \sim \mathcal{N}(0, 1)$, and consider the equivalent expectation $\E_z [\mathrm{ReLU}(\mu + \sigma z)]$. Note that $\mathrm{ReLU}(x) > 0$ if and only if $z > -\frac{\mu}{\sigma}$. Now we may split the integral into two parts, corresponding to the positive and zero parts of the ReLU:
+\begin{align*}
+    \E_z [\mathrm{ReLU}(\mu + \sigma z)] &= \int_{-\frac{\mu}{\sigma}}^{\infty} (\mu + \sigma z) \varphi(z) dz + \cancel{\int_{-\infty}^{-\frac{\mu}{\sigma}} 0\: \varphi(z) dz} \\
+    &= \mu \int_{-\frac{\mu}{\sigma}}^{\infty} \varphi(z) dz + \sigma  \int_{-\frac{\mu}{\sigma}}^{\infty} z \varphi(z) dz
+\end{align*}
+We can evaluate the first term using the standard normal CDF; by symmetry, it is simply $\Pphi ( \frac{\mu}{\sigma})$.
+
+To evaluate the second term, we can use the fact that $\int_a^{\infty} z \varphi(z) dz = \varphi(a)$ for any $a$. To see this, note that
+\begin{equation}
+\frac{d}{dz} \varphi(z) = \frac{d}{dz} \Big ( \frac{1}{\sqrt{2 \pi}} \exp \big ( -\frac{z^2}{2} \big ) \Big ) = \frac{1}{\sqrt{2 \pi}} (-z) \exp \Big ( -\frac{z^2}{2} \Big ) = -z \varphi(z)
+\end{equation}
+and therefore
+\begin{equation}\label{eq:linear-expectation}
+    \int_a^{\infty} z \varphi(z) dz = -\int_a^{\infty} \frac{d}{dz} \varphi(z) dz = -\big [ \varphi(\infty) - \varphi(a) \big ] = \varphi(a).
+\end{equation}
+Applying this identity to our case yields $\varphi(-\frac{\mu}{\sigma})$, or by the symmetry of the standard normal PDF about zero, $\varphi(\frac{\mu}{\sigma})$.
+
+Putting everything together, we have
+\begin{equation}\label{eq:relu-expectation}
+    \E_x [\mathrm{ReLU}(x)] = \mu \Pphi \Big ( \frac{\mu}{\sigma} \Big ) + \sigma \varphi \Big (\frac{\mu}{\sigma} \Big ).
+\end{equation}
+
+We can apply the above formula to evaluate
+\begin{equation}
+    \E_{\zz}[\mathrm{ReLU}(\mathbf{A}\zz + \mathbf{b})]_i = b_i \Pphi \Big ( \frac{b_i}{\| \mathbf{A}_i \|} \Big ) + \| \mathbf{A}_i \| \varphi \Big ( \frac{b_i}{\| \mathbf{A}_i \|} \Big )
+\end{equation}
+Let $\boldsymbol{s}$ denote the vector containing the Euclidean norms of the rows of $\mathbf{W}_1$. For a whole MLP it would then be
+\begin{equation}
+    \E_{\zz}[f(\zz)] = \mathbf{W}_2 \Big [ \mathbf{b}_1 \odot \Pphi (\mathbf{b}_1 \odot \boldsymbol{s}^{-1} ) + \boldsymbol{s} \odot \varphi ( \mathbf{b}_1 \odot \boldsymbol{s}^{-1} ) \Big ]
+\end{equation}
+
+\subsubsection{Cross-covariance}
+
+We now derive $\E[x \mathrm{ReLU}(x)]$ for $x \sim \mathcal{N}(\mu, \sigma)$. As in the previous section, we reparametrize $x = \mu + \sigma z$ where $z \sim \mathcal{N}(0, 1)$, and consider the equivalent expectation $\E[(\mu + \sigma z) \mathrm{ReLU}(\mu + \sigma z)]$. We now have:
+\begin{align}
+    \int_{-\infty}^{\infty} (\mu + \sigma z) \mathrm{ReLU}(\mu + \sigma z) \varphi(z) dz &= \mu \int_{-\infty}^{\infty} \mathrm{ReLU}(\mu + \sigma z) \varphi(z) dz + \sigma \int_{-\infty}^{\infty} z \mathrm{ReLU}(\mu + \sigma z) \varphi(z) dz \\
+    &= \mu^2 \Pphi \Big ( \frac{\mu}{\sigma} \Big ) + \mu \sigma \varphi \Big (\frac{\mu}{\sigma} \Big ) + \sigma \int_{-\infty}^{\infty} z \mathrm{ReLU}(\mu + \sigma z) \varphi(z) dz,
+\end{align}
+where we have applied Eq.~\ref{eq:relu-expectation} to evaluate the first term. For the second term, we split it into the positive and zero parts of the ReLU as before:
+\begin{align}
+    \int_{-\infty}^{\infty} z \mathrm{ReLU}(\mu + \sigma z) \varphi(z) dz &= \int_{-\frac{\mu}{\sigma}}^{\infty} z (\mu + \sigma z) \varphi(z) dz + \cancel{\int_{-\infty}^{-\frac{\mu}{\sigma}} z \mathrm{ReLU}(\mu + \sigma z) \varphi(z) dz} \\
+    &= \mu \int_{-\frac{\mu}{\sigma}}^{\infty} z \varphi(z) dz + \sigma \int_{-\frac{\mu}{\sigma}}^{\infty} z^2 \varphi(z) dz.
+\end{align}
+Applying the identity from Eq.~\ref{eq:linear-expectation} to the first term,
+\begin{align}
+    \int_{-\infty}^{\infty} z \mathrm{ReLU}(\mu + \sigma z) \varphi(z) dz = \mu \varphi(\frac{\mu}{\sigma} + \sigma 
+\end{align}
+
+\subsection{Higher-order moments}
+
+The above two derivations are special cases of a more general formula for $\E[ x^n \mathrm{ReLU}(x) ]$ for any $n \geq 0$. Reparametrizing as before and applying the binomial theorem, we have
+\begin{align}
+    \E[ x^n \mathrm{ReLU}(x) ] &= \int_{-\infty}^{\infty} (\mu + \sigma z)^n \mathrm{ReLU}(\mu + \sigma z) \varphi(z) dz \\
+    &= \sum_{k = 0}^{n + 1} \binom{n + 1}{k} \mu^{n + 1 - k} \sigma^k \int_{-\frac{\mu}{\sigma}}^\infty z^k \varphi(z) dz. \label{eq:relu-polynomial}
+\end{align}
+For $k \geq 2$, the integral $\int_{-\frac{\mu}{\sigma}}^\infty z^k \varphi(z) dz$ can be evaluated using the following recursion:
+\begin{equation}
+    \int_{-\frac{\mu}{\sigma}}^\infty z^k \varphi(z) dz = \Big ( \frac{\mu}{\sigma} \Big )^{k - 1} \varphi \Big ( \frac{\mu}{\sigma} \Big ) + (k - 1) \int_{-\frac{\mu}{\sigma}}^\infty z^{k - 2} \varphi(z) dz,
+\end{equation}
+where the value for $k = 0$ is simply $\Pphi(\frac{\mu}{\sigma})$, and the value for $k = 1$ is  $\varphi(\frac{\mu}{\sigma})$ (see Eq.~\ref{eq:linear-expectation}). The recursion is computationally efficient because Eq.~\ref{eq:relu-polynomial} makes use of every intermediate value from $k = 0$ to $k = n + 1$.
+
+Alternatively, we can use the upper \href{https://en.wikipedia.org/wiki/Incomplete_gamma_function}{incomplete gamma function}, which is available in popular libraries like \href{https://docs.scipy.org/doc/scipy/reference/generated/scipy.special.gammainc.html}{SciPy}, \href{https://pytorch.org/docs/stable/special.html#torch.special.gammaincc}{PyTorch}, and \href{https://jax.readthedocs.io/en/latest/_autosummary/jax.scipy.special.gammainc.html}{JAX}. It is defined as $\Gamma(s, x) = \int_x^{\infty} t^{s - 1} \exp(-t) dt$. Specifically,
+\begin{align}
+    \int_{-\frac{\mu}{\sigma}}^\infty z^k \varphi(z) dz = \frac{1}{\sqrt{2 \pi}} \int_{-\frac{\mu}{\sigma}}^\infty z^k \exp \Big ( -\frac{z^2}{2} \Big ) dz = \frac{2^{k/2}}{\sqrt{2 \pi}} \Gamma \Big ( \frac{k + 1}{2}, -\frac{\mu^2}{2 \sigma^2} \Big ).
+\end{align}
+Putting it all together, we have
+\begin{equation}
+    \E[ x^n \mathrm{ReLU}(x) ] = \frac{1}{\sqrt{2 \pi}} \sum_{k = 0}^{n + 1} \binom{n + 1}{k} 2^{k/2} \mu^{n + 1 - k} \sigma^k \Gamma \Big ( \frac{k + 1}{2}, -\frac{\mu^2}{2 \sigma^2} \Big ).
+\end{equation}
+
+\newpage
+\section{SVD}
+\subsection{Workflow}
+\begin{itemize}
+\item Train a 1L fully connected FFN $M$ on a data distribution.
+\item (Optional) compute mean $\mmu_x$ and covariance $\SSigma_x$ for (a subset of) the train distribution. Otherwise, we assume $0$ mean and identity covariance statistics.
+\item Compute ordinary least squares (OLS) best quadratic (or linear) fit $Q_{\mathcal{N}(\mmu, \SSigma)}(x)=\Gamma(x)+\bbeta(x)+\aalpha(x)$, assuming the input distribution is a multi-variate gaussian distribution $\mathcal{N}(\mmu, \SSigma)$. Note that when assuming 0 mean and identity covariance, the linear best fit is given by $L_{\mathcal{N}(0,I)}(x)=Q_{\mathcal{N}(0, I)}(x)-\Gamma(x)=\bbeta(x)+\aalpha(x)$.
+\item Study $Q(x)$ on the same distributions of interest as $M(x)$, e.g. the test set for $M$. Some ways to study $Q$:
+\begin{itemize}
+\item Breakdown of logit contributions for each of the 0th, 1st, 2nd order terms in $Q(x)$, random x and test set x.
+\item SVD on 1st order linear term $\bbeta$. Validate functional proximity by projecting off top left components from $M$ inputs.
+\item Visualize logit rows of $\bbeta$ vs SVD components.
+\item Analyze quadratic term through eigenvector analysis. Choose output directions as logits vs top right components of SVD($\bbeta$)
+\end{itemize}
+\item Follow-up variations might include
+\begin{itemize}
+\item Cifar, dropout. 2 epochs vs 128 epochs. Eigenvectors towards right beta singular vectors
+%\item Relative importance of 0th/1st/2nd order terms over training/regularization: weight decay, dropout
+\item When the quad fit is bad, still look at the relative contributions
+\end{itemize}
+\end{itemize}
+
+\subsection{Procedure}
+As a proof of concept, we trained a 1L ReLU FFN $M$ on MNIST, hyperparameters blah.
+We fit a quadratic approximation $Q_{\mathcal{N}(0,I)}(x)$ to $M$. Note here that we do \emph{not} use MNIST statistics in our approximation, we only use the weights of $M$. Now look at some plots.
+
+\begin{figure}[h]
+    \centering
+    \includegraphics[width=\textwidth]{icml2024/figures/MLP_MDL.pdf}
+    \caption{Minimum description length over 5 seeds for MLPs of various lengths and widths. MLPs with a varying depth have a constant width of 128 and MLPs with a varying width have a constant depth of 2.}
+    \label{fig:mlp_mdl}
+\end{figure}
+
+\begin{figure}[h]
+    \centering
+    \includegraphics[width=\textwidth]{icml2024/figures/MLP_ReLU_loss.pdf}
+    \caption{Loss over 5 seeds for ReLU MLPs of various lengths and widths. MLPs with a varying depth have a constant width of 128 and MLPs with a varying width have a constant depth of 2.}
+    \label{fig:mlp_relu}
+\end{figure}
+
+\begin{figure}[h]
+    \centering
+    \includegraphics[width=\textwidth]{icml2024/figures/MLP_GELU_loss.pdf}
+    \caption{Loss over 5 seeds for GELU MLPs of various lengths and widths. MLPs with a varying depth have a constant width of 128 and MLPs with a varying width have a constant depth of 2.}
+    \label{fig:mlp_gelu}
+\end{figure}
+
+\begin{figure}[h]
+    \centering
+    \includegraphics[width=\textwidth]{icml2024/figures/MLP_SwiGLU_loss.pdf}
+    \caption{Loss over 5 seeds for SwiGLU MLPs of various lengths and widths. MLPs with a varying depth have a constant width of 128 and MLPs with a varying width have a constant depth of 2.}
+    \label{fig:mlp_swiglu}
+\end{figure}
+
+\begin{figure}[h]
+    \centering
+    \includegraphics[width=\textwidth]{icml2024/figures/MLP_loss.pdf}
+    \caption{Loss over 5 seeds for MLPs of various lengths, widths, and activation functions. Choice of activation function has no consistent effect on performance.}
+    \label{fig:mlp_activations}
+\end{figure}
+
+Measuring how linear $M$ is:
+\begin{itemize}
+\item Compute SVD of beta term: $\beta = \sum \sigma_i u_i v_i^T$. If $M$ is approximately linear, then $f(x+\varepsilon u_1)-f(x) \approx \varepsilon\beta(u_1) = \varepsilon \sigma_i v_i^T$
+\end{itemize}
+Wait this just seems dumb. We could do analytic FVU instead. What's the point of doing SVD again?
+
+
+\iffalse
+\newpage
+\begin{figure}[h]
+    \centering
+    \includegraphics[width=0.7\textwidth]{figures/mnist/beta_viz.png}
+    \caption{Linear logit basis}
+    \label{fig:label_name}
+\end{figure}
+
+\begin{figure}[h]
+    \centering
+    \includegraphics[width=0.7\textwidth]{figures/mnist/svd_viz.png}
+    \caption{Left singular vectors of linear term}
+    \label{fig:label_name}
+\end{figure}
+
+\begin{figure}[h]
+    \centering
+    \includegraphics[width=0.6\textwidth]{icml2024/figures/mnist/gamma7_eigs_viz.png}
+    \caption{Eigenvectors for predicting a '7'}
+    \label{fig:label_name}
+\end{figure}
+
+\begin{figure}[h]
+    \centering
+    \includegraphics[width=0.6\textwidth]{figures/mnist/adv_acc.png}
+    \caption{Accuracy tradeoff for top singular components}
+    \label{fig:label_name}
+\end{figure}
+
+\begin{figure}[h]
+    \centering
+    \includegraphics[width=0.6\textwidth]{figures/mnist/logits.png}
+    \caption{Accuracy tradeoff for top singular components}
+    \label{fig:label_name}
+\end{figure}
+\fi
+\end{document}
+
+
+% This document was modified from the file originally made available by
+% Pat Langley and Andrea Danyluk for ICML-2K. This version was created
+% by Iain Murray in 2018, and modified by Alexandre Bouchard in
+% 2019 and 2021 and by Csaba Szepesvari, Gang Niu and Sivan Sabato in 2022.
+% Modified again in 2023 and 2024 by Sivan Sabato and Jonathan Scarlett.
+% Previous contributors include Dan Roy, Lise Getoor and Tobias
+% Scheffer, which was slightly modified from the 2010 version by
+% Thorsten Joachims & Johannes Fuernkranz, slightly modified from the
+% 2009 version by Kiri Wagstaff and Sam Roweis's 2008 version, which is
+% slightly modified from Prasad Tadepalli's 2007 version which is a
+% lightly changed version of the previous year's version by Andrew
+% Moore, which was in turn edited from those of Kristian Kersting and
+% Codrina Lauth. Alex Smola contributed to the algorithmic style files.

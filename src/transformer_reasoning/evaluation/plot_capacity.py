@@ -30,11 +30,15 @@ def cap_vs_N_plot(df, scheme=None, selection_scheme=None, rel_str=None, plot_com
                 sns.scatterplot(data=data, x='N_profiles', y='total_capacity', style='hops', ax=ax)
                 sns.lineplot(data=data, x='N_profiles', y='total_capacity', style='hops', ax=ax)
                 sns.lineplot(data=data, x='N_profiles', y='baseline_capacity', ax=ax, color='gray', linestyle='--', label='baseline')
+                sns.scatterplot(data=data, x='N_profiles', y='baseline_capacity', ax=ax, color='gray', marker='+', label='baseline')
                 for hop_val in data['hops'].unique():
                     hop_data = data[data['hops'] == hop_val]
                     sns.lineplot(data=hop_data, x='N_profiles', y='dataset_entropy', ax=ax, color='red',
                                 linestyle='--' if hop_val == 2 else '-',
                                 label=f'{hop_val}-hop entropy')
+                    sns.scatterplot(data=hop_data, x='N_profiles', y='dataset_entropy', ax=ax, color='red',
+                                    marker='o' if hop_val == 2 else 'x',
+                                    label=f'{hop_val}-hop entropy')
                 ax.axhline(y=max_capacity, color='black', linestyle='--', label='est. max capacity')
                 ax.set_ylim(0, max_capacity * 1.1)  # Set y limit with 10% padding
                 ax.legend()
@@ -73,13 +77,17 @@ def cap_vs_N_plot(df, scheme=None, selection_scheme=None, rel_str=None, plot_com
                 sns.scatterplot(data=data, x='N_profiles', y='total_capacity', style='hops', ax=ax)
                 sns.lineplot(data=data, x='N_profiles', y='total_capacity', style='hops', ax=ax)
                 sns.lineplot(data=data, x='N_profiles', y='baseline_capacity', ax=ax, color='gray', linestyle='--', label='baseline')
+                sns.scatterplot(data=data, x='N_profiles', y='baseline_capacity', ax=ax, color='gray', marker='+', label='baseline')
                 for hop_val in data['hops'].unique():
                     hop_data = data[data['hops'] == hop_val]
                     sns.lineplot(data=hop_data, x='N_profiles', y='dataset_entropy', ax=ax, color='red',
                                 linestyle='--' if hop_val == 2 else '-',
                                 label=f'{hop_val}-hop entropy')
+                    sns.scatterplot(data=hop_data, x='N_profiles', y='dataset_entropy', ax=ax, color='red',
+                                    marker='o' if hop_val == 2 else 'x',
+                                    label=f'{hop_val}-hop entropy')
                 ax.axhline(y=max_capacity, color='black', linestyle='--', label='est. max capacity')
-                ax.set_ylim(0, max_capacity * 1.1)  # Set y limit with 10% padding
+                ax.set_ylim(0, max_capacity * 1.5)
                 ax.legend()
                 ax.set_title(f'Total Capacity - Max Train Hops = {max_ord}')
                 ax.set_xlabel('N profiles')
@@ -90,6 +98,55 @@ def cap_vs_N_plot(df, scheme=None, selection_scheme=None, rel_str=None, plot_com
                        bbox_inches='tight', dpi=300)
         
         plt.close()
+
+
+def cap_vs_params_plot(df, scheme=None, selection_scheme=None, rel_str=None):
+    filtered_df = df.groupby(['N_profiles', 'n_params', 'max_train_hops', 'weight_decay', 'hops', 'layers']).last().reset_index(drop=False)
+    filtered_df = filtered_df[filtered_df['global_step'] >= 700000]
+    
+    # Modified filter to include 2.1 hops
+    filtered_df = filtered_df[
+        (filtered_df['hops'].isin([2, 2.1])) & 
+        (filtered_df['max_train_hops'] == 2)
+    ]
+    
+
+    # filtered_df['combined_entropy'] = 
+    N_sizes = filtered_df['N_profiles'].unique()
+    filtered_df['max_capacity'] = 2.2 * filtered_df['n_params']
+    for N in N_sizes:
+        plot_df = filtered_df[filtered_df['N_profiles'] == N]
+        
+        # Create two subplots side by side
+        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(24, 8))
+        
+        # Plot for 2-hop capacity (left subplot)
+        two_hop_df = plot_df[plot_df['hops'] == 2]
+        sns.scatterplot(data=two_hop_df, x='n_params', y='total_capacity', hue='layers', style='layers', ax=ax1)
+        sns.lineplot(data=two_hop_df, x='n_params', y='total_capacity', hue='layers', ax=ax1)
+        sns.lineplot(data=two_hop_df, x='n_params', y='baseline_capacity', color='gray', linestyle='--', label='baseline', ax=ax1)
+        sns.lineplot(data=two_hop_df, x='n_params', y='dataset_entropy', color='red', linestyle='--', label='2-hop entropy', ax=ax1)
+        sns.lineplot(data=two_hop_df, x='n_params', y='max_capacity', color='black', linestyle='--', label='est. max capacity', ax=ax1)
+        
+        # Plot for 2.1-hop capacity (right subplot)
+        combined_hop_df = plot_df[plot_df['hops'] == 2.1]
+        sns.scatterplot(data=combined_hop_df, x='n_params', y='total_capacity', hue='layers', style='layers', ax=ax2)
+        sns.lineplot(data=combined_hop_df, x='n_params', y='total_capacity', hue='layers', ax=ax2)
+        sns.lineplot(data=combined_hop_df, x='n_params', y='baseline_capacity', color='gray', linestyle='--', label='baseline', ax=ax2)
+        # sns.lineplot(data=combined_hop_df, x='n_params', y='dataset_entropy', color='red', linestyle='--', label='combined entropy', ax=ax2)
+        sns.lineplot(data=combined_hop_df, x='n_params', y='max_capacity', color='black', linestyle='--', label='est. max capacity', ax=ax2)
+
+        # Configure both subplots
+        for ax, title in zip([ax1, ax2], ['2-hop Capacity', 'Combined 1-hop + 2-hop Capacity']):
+            ax.set_xlabel('Number of Parameters')
+            ax.set_ylabel('Capacity (bits)')
+            ax.set_title(f'{title} vs Parameters (N={N})')
+            ax.legend(title='Number of Layers')
+
+        plt.savefig(get_project_root() / f'results/capacity_vs_params_N{N}_{scheme}_{selection_scheme}{rel_str}.png',
+                   bbox_inches='tight', dpi=300)
+        plt.close()
+
 
 def cap_vs_norm_plot(df, scheme=None):
     """Plot capacity vs parameter norm using all timestep data."""
@@ -190,7 +247,6 @@ def capacity_plot(df, N_sizes, entropies_optimal, name_selection_entropy_optimal
         plt.close()
 
 
-
 def get_nearest_param_color(param_count):
     all_param_sizes = np.logspace(np.log10(500_000), np.log10(10_000_000), 20)  # 20 discrete colors
     param_colors = plt.cm.viridis(np.linspace(0, 1, len(all_param_sizes)))
@@ -234,27 +290,3 @@ def get_closest_step_data(df, target, use_normalized=True):
     """For each group, get the row with step count closest to target."""
     step_col = 'normalized_step' if use_normalized else 'global_step'
     return df.iloc[(df[step_col] - target).abs().argsort()].iloc[0]
-
-def cap_vs_params_plot(df, N_sizes, use_normalized_step=True, scheme=None):
-    # Get target from N=10000 data
-    step_col = 'normalized_step' if use_normalized_step else 'global_step'
-    target = df[df['N_profiles'] == 50000][step_col].max()
-    
-    # Filter to closest steps for each config
-    filtered_df = df.groupby(['N_profiles', 'n_params', 'max_train_hops', 'weight_decay', 'hops']).apply(
-        lambda x: get_closest_step_data(x, target, use_normalized_step)
-    ).reset_index(drop=True)
-
-    # Rest of plotting code remains the same
-    for N in N_sizes:
-        plt.figure(figsize=(10, 6))
-        plot_df = filtered_df[filtered_df['N_profiles'] == N]
-
-        fig, axes = plt.subplots(1, 2, figsize=(20, 6))  # 1 row, 2 columns
-        for max_ord, ax in zip([1, 2], axes):
-            data = plot_df[plot_df['max_train_hops'] == max_ord]
-            sns.scatterplot(data=data, x='n_params', y='capacity', style='hops', ax=ax)
-            sns.lineplot(data=data, x='n_params', y='capacity', style='hops', ax=ax)
-            ax.set_title(f'Max Order = {max_ord}')
-
-        plt.savefig(get_project_root() / f'results/capacity_vs_params_N{N}_{scheme}.png', bbox_inches='tight')

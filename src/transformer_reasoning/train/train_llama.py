@@ -9,7 +9,7 @@ import os
 
 from transformer_reasoning.train.train_utils import calculate_model_size, create_model_and_tokenizer, train_single_model
 from transformer_reasoning.train.dataset import load_and_prepare_datasets
-
+from transformer_reasoning.models.llama_mup import LlamaMuPForCausalLM
 
 def find_question_end(text, tokenizer):
     # Find the last occurrence of "? "
@@ -39,13 +39,13 @@ def main(args):
         else:
             latest_checkpoint = [c for c in checkpoints if f"checkpoint-{args.checkpoint_number}" in c][0]
         print(f"Loading model from checkpoint: {latest_checkpoint}")
-        model = LlamaForCausalLM.from_pretrained(latest_checkpoint)
+        model = LlamaMuPForCausalLM.from_pretrained(latest_checkpoint)
 
     model_size_mb = calculate_model_size(real_num_params)
     print(f"Estimated model size: {model_size_mb} MB")
     print(f"Epochs: {args.num_epochs}")
 
-    train_single_model(model, tokenizer, args, output_dir, args.curriculum)
+    train_single_model(model, tokenizer, args, output_dir, output_dir, args.curriculum)
 
     if args.push_to_hub:
         hub_id = f"EleutherAI/llama_multihop_n{args.N}_p{real_num_params}_omin{min(args.orders)}_omax{max(args.orders)}_wd{args.wd}_l{args.num_layers}_lr{args.lr}_beta1{args.beta1}_{sf_str}{rel_str}{hop_str}{curr_str}"

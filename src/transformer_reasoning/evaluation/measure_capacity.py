@@ -11,7 +11,7 @@ from datasets import load_dataset
 from transformer_reasoning.utils import get_project_root
 from transformer_reasoning.evaluation.measure_entropy import calculate_entropy, calculate_selection_entropy
 from transformer_reasoning.evaluation.eval_utils import load_eval_results
-from transformer_reasoning.evaluation.plot_capacity import cap_vs_N_plot
+from transformer_reasoning.evaluation.plot_capacity import cap_vs_N_plot, cap_vs_params_plot
 from transformer_reasoning.generate_dataset.generate_profiles import RELATIONSHIP_TYPES
 
 import seaborn as sns
@@ -146,14 +146,13 @@ def process_timestep_data(
         name_selection_entropy, 
         birth_date_selection_entropy, 
         scheme,
-        dataset_entropy
     ):
     """Calculate capacities for each timestep in the loss data."""
     results = []
     filtered_eval_results = eval_results[eval_results['N_profiles'] == N]
     # Group by model configuration
-    for (num_parameters, min_order, max_order, wd, eval_hops, global_step), group in filtered_eval_results.groupby(
-        ['n_params', 'min_train_hops', 'max_train_hops', 'weight_decay', 'hops', 'global_step']
+    for (num_parameters, min_order, max_order, wd, eval_hops, global_step, layers), group in filtered_eval_results.groupby(
+        ['n_params', 'min_train_hops', 'max_train_hops', 'weight_decay', 'hops', 'global_step', 'layers']
     ):
         total_losses = {}
         for _, row in group.iterrows():
@@ -184,6 +183,7 @@ def process_timestep_data(
             eval_hops,
             scheme
         )
+
         
         result = {
             'n_params': num_parameters,
@@ -196,7 +196,8 @@ def process_timestep_data(
             'parameter_norm': row['parameter_l2'],
             'capacity': capacities['total_capacity'],
             'baseline_capacity': name_selection_entropy + birth_date_selection_entropy,
-            'dataset_entropy': dataset_entropy['total_capacity']
+            'dataset_entropy': dataset_entropy['total_capacity'],
+            'layers': layers
         }
 
         result.update(capacities)
@@ -211,11 +212,12 @@ def process_timestep_data(
                 (filtered_eval_results['max_train_hops'] == max_order) &
                 (filtered_eval_results['weight_decay'] == wd) &
                 (filtered_eval_results['global_step'] == global_step)
-            ].iloc[0]
-            one_hop_losses['all_questions'] = one_hop_losses['loss'].mean() / np.log(2)
+            ]
+            one_hop_losses_dict = {row['subject']: row['loss'] / np.log(2) for _, row in one_hop_losses.iterrows()}
+            one_hop_losses_dict['all_questions'] = one_hop_losses['loss'].mean() / np.log(2)
 
             incr_capacities = calculate_capacities(
-                one_hop_losses, 
+                one_hop_losses_dict, 
                 entropies, 
                 name_selection_entropy, 
                 birth_date_selection_entropy, 
@@ -330,10 +332,17 @@ def main():
     parser.add_argument("--scheme", type=str, choices=["optimal", "2-hop-big-hash"], default="optimal")
     parser.add_argument("--selection_scheme", type=str, choices=["optimal", "enumerate", "independent"], default="optimal")
     parser.add_argument("--relations", type=int, default=None)
+    parser.add_argument("--subjectwise", action="store_true")
+    parser.add_argument("--skip_mode", action="store_true")
     args = parser.parse_args()
 
-    eval_results = load_eval_results()
+    eval_results = load_eval_results(skip_mode=args.skip_mode)
     rel_str = f"_r{args.relations}" if args.relations else ""
+
+    if not args.subjectwise:
+        eval_results = eval_results[pd.isna(eval_results['subject'])]
+    else:
+        eval_results = eval_results[~pd.isna(eval_results['subject'])]
 
     if args.relations is not None:
         eval_results = eval_results[eval_results['relations'] == args.relations]
@@ -348,17 +357,6 @@ def main():
         
         # Load and process dataset
         profiles_dataset = load_dataset(f"EleutherAI/profiles_dataset_{N}_uniform{rel_str}")['train']
-
-        relations = [r for r in RELATIONSHIP_TYPES if r in profiles_dataset.features]
-
-        attribute_values = {
-            'name': list(set(profiles_dataset['name'])),
-            'birth_date': list(set(profiles_dataset['birth_date'])),
-            'birth_city': list(set(profiles_dataset['birth_city'])),
-            'university': list(set(profiles_dataset['university'])),
-            'employer': list(set(profiles_dataset['employer'])),
-            **{r: list(set(profile['name'] for profile in profiles_dataset[r])) for r in relations}
-        }
 
         # Calculate entropies
         entropies, name_selection_entropy, birth_date_selection_entropy = dataset_component_entropies(
@@ -406,6 +404,7 @@ def main():
     # normalized_capacity_plot(final_df, args.scheme)
     # cap_vs_params_plot(all_timestep_df, N_sizes, scheme=args.scheme)
     cap_vs_N_plot(all_timestep_df, scheme=args.scheme, selection_scheme=args.selection_scheme, rel_str=rel_str)
+    cap_vs_params_plot(all_timestep_df, scheme=args.scheme, selection_scheme=args.selection_scheme, rel_str=rel_str)
     
     # Plot capacity vs norm using all timesteps
     # cap_vs_norm_plot(all_timestep_df, scheme=args.scheme)
