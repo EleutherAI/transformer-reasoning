@@ -33,7 +33,7 @@ def load_and_prepare_datasets(
         max_seq_len=512,
         orders=orders or [1,2],
         hop_ratio=hop_ratio,
-        heldout_fraction=0.05,
+        heldout_fraction=0.1,
         heldout_sets=heldout_sets,
         debug=debug
     )
@@ -43,7 +43,7 @@ def load_and_prepare_datasets(
 
 class InfiniteQADataset(IterableDataset):
     def __init__(self, profiles_dataset, tokenizer, max_seq_len=512, orders=[1,2], subjects=None, 
-                 hop_ratio=0.1, heldout_fraction=0.05, mode="train", heldout_sets=None, seed_offset=0,
+                 hop_ratio=0.1, heldout_fraction=0.1, specific_heldout_fraction=0.02, mode="train", heldout_sets=None, seed_offset=0,
                  debug=False):
         self.profiles = profiles_dataset
         self.tokenizer = tokenizer
@@ -68,7 +68,7 @@ class InfiniteQADataset(IterableDataset):
         if heldout_sets is not None:
             self.heldout_sets = heldout_sets
         else:
-            self._generate_all_heldout_sets(heldout_fraction)
+            self._generate_all_heldout_sets(heldout_fraction, specific_heldout_fraction)
 
         if self.debug:
             self.heldout_sets_for_use = self.heldout_sets
@@ -79,31 +79,116 @@ class InfiniteQADataset(IterableDataset):
         """Allow external epoch updates"""
         self._epoch = epoch
 
-    def _generate_all_heldout_sets(self, fraction):
+    def _generate_all_heldout_sets(self, fraction, specific_heldout_fraction):
         if not dist.is_initialized() or dist.get_rank() == 0:
             n_profiles = len(self.profiles)
             available_relations = get_available_relations(self.profiles[0])
             n_relations = len(available_relations) 
             n_attributes = len(ATTRIBUTES)
 
+            # Store original heldout sets for testing
             self.heldout_sets = {
-                "first_people": sorted(random.sample(range(n_profiles), max(1, int(n_profiles * fraction)))),
-                "relations": sorted(random.sample(available_relations, max(1, int(n_relations * fraction)))),
+                "first_people": sorted(random.sample(range(n_profiles), max(1, int(n_profiles * specific_heldout_fraction)))),
+                "relations": sorted(random.sample(available_relations, max(1, int(n_relations * specific_heldout_fraction)))),
                 "person_relation_pairs": sorted(
                     random.sample([(p, r) for p in range(n_profiles) for r in available_relations], 
-                                max(1, int(n_profiles * n_relations * fraction)))
+                                max(1, int(n_profiles * n_relations * specific_heldout_fraction)))
                 ),
-                "second_people": sorted(random.sample(range(n_profiles), max(1, int(n_profiles * fraction)))),
-                "second_attributes": sorted(random.sample(ATTRIBUTES + available_relations, max(1, int(n_attributes * fraction)))),
+                "second_people": sorted(random.sample(range(n_profiles), max(1, int(n_profiles * specific_heldout_fraction)))),
+                "second_attributes": sorted(random.sample(ATTRIBUTES + available_relations, max(1, int(n_attributes * specific_heldout_fraction)))),
                 "second_person_attribute_pairs": sorted(
                     random.sample([(p, a) for p in range(n_profiles) for a in ATTRIBUTES + available_relations],
-                                max(1, int(n_profiles * n_attributes * fraction)))
-                ),
-                "complete_two_hop_questions": sorted(
-                    random.sample([(p, r, a) for p in range(n_profiles) for r in available_relations for a in available_relations + ATTRIBUTES],
-                                max(1, int(n_profiles * n_relations * n_attributes * fraction)))
+                                max(1, int(n_profiles * n_attributes * specific_heldout_fraction)))
                 )
             }
+
+            available_first_people = list(set(range(n_profiles)) - set(self.heldout_sets["first_people"]))
+
+            # Caching profile indices to avoid repeated lookups
+            print("caching profile indices")
+            profile_indices = {(p, r): self.profiles[p][r]['index'] 
+                             for p in range(n_profiles) 
+                             for r in available_relations}
+            print('cached profile indices')
+
+            available_fp_r_a_sp_tuples = set([(p, r, a, profile_indices[(p, r)]) 
+                                              for p in available_first_people 
+                                              for r in available_relations 
+                                              for a in ATTRIBUTES + available_relations])
+
+            # Calculate tuples for each heldout set
+            relations_tuples = set([(p, r, a, sp)
+                        for (p, r, a, sp) in available_fp_r_a_sp_tuples
+                        if r in self.heldout_sets["relations"]])
+
+            available_fp_r_a_sp_tuples = available_fp_r_a_sp_tuples - relations_tuples
+
+            second_attribute_tuples = set([(p, r, a, sp)
+                                for (p, r, a, sp) in available_fp_r_a_sp_tuples
+                                if a in self.heldout_sets["second_attributes"]])
+
+            available_fp_r_a_sp_tuples = available_fp_r_a_sp_tuples - second_attribute_tuples
+
+            person_relation_tuples = set([(p, r, a, sp)
+                                        for (p, r, a, sp) in available_fp_r_a_sp_tuples
+                                        if (p, r) in self.heldout_sets["person_relation_pairs"]])
+
+            available_fp_r_a_sp_tuples = available_fp_r_a_sp_tuples - person_relation_tuples
+
+            second_people_tuples = set([(p, r, a, sp)
+                                      for (p, r, a, sp) in available_fp_r_a_sp_tuples
+                                      if sp in self.heldout_sets["second_people"]])
+
+            available_fp_r_a_sp_tuples = available_fp_r_a_sp_tuples - second_people_tuples
+
+            second_person_attribute_tuples = set([(p, r, a, sp)
+                                         for (p, r, a, sp) in available_fp_r_a_sp_tuples
+                                         if (sp, a) in self.heldout_sets["second_person_attribute_pairs"]])
+
+            available_fp_r_a_sp_tuples = available_fp_r_a_sp_tuples - second_person_attribute_tuples
+
+            complete_two_hop_tuples = sorted(random.sample(sorted(available_fp_r_a_sp_tuples), 
+                                                                max(1, int(n_profiles * n_relations * n_attributes * fraction))))
+
+            available_fp_r_a_sp_tuples = sorted(set(available_fp_r_a_sp_tuples) - set(complete_two_hop_tuples))
+
+            # Update heldout_sets with all tuple sets
+            self.heldout_sets.update({
+                "person_relation_tuples": sorted(person_relation_tuples),
+                "second_people_tuples": sorted(second_people_tuples),
+                "second_person_attribute_tuples": sorted(second_person_attribute_tuples),
+                "relations_tuples": sorted(relations_tuples),
+                "second_attribute_tuples": sorted(second_attribute_tuples),
+                "complete_two_hop_tuples": sorted(complete_two_hop_tuples),
+                "available_training_tuples": sorted(available_fp_r_a_sp_tuples),
+            })
+
+            num_first_people = (len(self.heldout_sets['first_people']) 
+                                * (len(ATTRIBUTES) + len(available_relations))
+                                * len(available_relations))
+
+            sum_of_lengths = (len(self.heldout_sets['available_training_tuples']) + 
+                              len(self.heldout_sets['person_relation_tuples']) + 
+                              len(self.heldout_sets['second_people_tuples']) + 
+                              len(self.heldout_sets['second_person_attribute_tuples']) + 
+                              len(self.heldout_sets['relations_tuples']) + 
+                              len(self.heldout_sets['second_attribute_tuples']) + 
+                              len(self.heldout_sets['complete_two_hop_tuples']) +
+                              num_first_people)
+
+            full_length = len(profile_indices)*(len(ATTRIBUTES) + len(available_relations))
+
+            print(f"Heldout sets computed. Training tuples: {len(self.heldout_sets['available_training_tuples'])}\n\
+                  Person relation tuples: {len(self.heldout_sets['person_relation_tuples'])}\n\
+                  Second people tuples: {len(self.heldout_sets['second_people_tuples'])}\n\
+                  Second person attribute tuples: {len(self.heldout_sets['second_person_attribute_tuples'])}\n\
+                  Relations tuples: {len(self.heldout_sets['relations_tuples'])}\n\
+                  Second attribute tuples: {len(self.heldout_sets['second_attribute_tuples'])}\n\
+                  Complete two hop tuples: {len(self.heldout_sets['complete_two_hop_tuples'])}\n\
+                  First people tuples: {num_first_people}\n\
+                  Sum: {sum_of_lengths}\n\
+                  Full length: {full_length}")
+
 
         if dist.is_initialized():
             if dist.get_rank() != 0:
@@ -191,17 +276,38 @@ class InfiniteQADataset(IterableDataset):
 
     def generate_qa(self, heldout_sets):
         while True:
-            relation, attribute = None, None
-            if self.mode == "eval_first_people":
-                profile_idx = random.choice(self.heldout_sets["first_people"])
-            elif self.mode == "eval_complete_two_hop_questions":
-                profile_idx, relation, attribute = random.choice(self.heldout_sets["complete_two_hop_questions"])
+            if self.mode == "train":
+                order = random.choices(self.orders, weights=self.order_weights, k=1)[0]
+                if order == 2:
+                    profile_idx, relation, attribute, _ = random.choice(self.heldout_sets["available_training_tuples"])
+                else:
+                    profile_idx = random.choice(self.qa_indices)
+                    relation, attribute = None, None
             else:
-                profile_idx = random.choice(self.qa_indices)
+                order = 2
+                if self.mode == "eval_first_people":
+                    profile_idx = random.choice(self.heldout_sets["first_people"])
+                    relation, attribute = None, None
+                elif self.mode == "eval_complete_two_hop_questions":
+                    profile_idx, relation, attribute, _ = random.choice(self.heldout_sets["complete_two_hop_tuples"])
+                elif self.mode == "eval_second_people":
+                    profile_idx, relation, attribute, _ = random.choice(self.heldout_sets["second_people_tuples"])
+                elif self.mode == "eval_second_attributes":
+                    profile_idx, relation, attribute, _ = random.choice(self.heldout_sets["second_attributes_tuples"])
+                elif self.mode == "eval_person_relation_pairs":
+                    profile_idx, relation, attribute, _ = random.choice(self.heldout_sets["person_relation_tuples"])
+                elif self.mode == "eval_relations":
+                    profile_idx, relation, attribute, _ = random.choice(self.heldout_sets["relations_tuples"])
+                elif self.mode == "eval_second_attributes":
+                    profile_idx, relation, attribute, _ = random.choice(self.heldout_sets["second_attributes_tuples"])
+                elif self.mode == "eval_second_person_attribute_pairs":
+                    profile_idx, relation, attribute, _ = random.choice(self.heldout_sets["second_person_attribute_pairs"])
+                else:
+                    raise ValueError(f"Invalid mode: {self.mode}")
+
             profile = self.profiles[profile_idx]
             
             # Training uses both 1-hop and 2-hop, eval uses only 2-hop
-            order = random.choices(self.orders, weights=self.order_weights, k=1)[0] if self.mode == "train" else 2
             
             question = maybe_generate_question(
                 profile=profile, 

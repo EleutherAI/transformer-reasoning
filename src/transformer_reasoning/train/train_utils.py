@@ -408,7 +408,7 @@ def calculate_architecture(num_params, n_layers=4):
 
 def create_model_and_tokenizer(num_params, num_layers=4):
     n_layers, hidden_size = calculate_architecture(num_params, num_layers)
-    n_layers_base, hidden_size_base = calculate_architecture(400_000, num_layers)
+    n_layers_base, hidden_size_base = calculate_architecture(900_000 * 4/num_layers, num_layers)
     n_layers_delta, hidden_size_delta = calculate_architecture(10_000_000, num_layers)
     
     tokenizer = AutoTokenizer.from_pretrained("EleutherAI/llama_multihop_tokenizer")
@@ -421,6 +421,7 @@ def create_model_and_tokenizer(num_params, num_layers=4):
         num_hidden_layers=n_layers,
         num_attention_heads=hidden_size // 16,
         max_position_embeddings=2048,
+        attn_mult=1
     )
     
     config_base = LlamaMuPConfig(
@@ -430,6 +431,7 @@ def create_model_and_tokenizer(num_params, num_layers=4):
         num_hidden_layers=n_layers_base,
         num_attention_heads=hidden_size_base // 16,
         max_position_embeddings=2048,
+        attn_mult=1
     )
 
     config_delta = LlamaMuPConfig(
@@ -439,6 +441,7 @@ def create_model_and_tokenizer(num_params, num_layers=4):
         num_hidden_layers=n_layers_delta,
         num_attention_heads=hidden_size_delta // 16,
         max_position_embeddings=2048,
+        attn_mult=1
     )
 
     model_base = LlamaMuPForCausalLM(config_base)
