@@ -1,17 +1,8 @@
 import random
-from typing import Iterator, Dict
-from concurrent.futures import ThreadPoolExecutor
-import queue
-import threading
-import time
-from functools import partial
 
 import torch.distributed as dist
 import torch
 from torch.utils.data import IterableDataset
-
-import jax.numpy as jnp
-import jax
 
 from datasets import load_dataset
 
@@ -22,16 +13,15 @@ from transformer_reasoning.utils import get_project_root
 
 def load_and_prepare_datasets(
         tokenizer, 
-        N=250000, 
+        N=25000, 
         orders=None, 
         relations=None, 
         hop_ratio=0.1, 
-        jax=False, 
         heldout_sets=None, 
         debug=False
     ):
 
-    dataset_class = JAXQADataset if jax else InfiniteQADataset
+    dataset_class = InfiniteQADataset
 
     relation_str = f'_r{relations}' if relations else ''
     # Load profiles dataset
@@ -43,7 +33,7 @@ def load_and_prepare_datasets(
         max_seq_len=512,
         orders=orders or [1,2],
         hop_ratio=hop_ratio,
-        heldout_fraction=0.05,
+        heldout_fraction=0.1,
         heldout_sets=heldout_sets,
         debug=debug
     )
@@ -53,7 +43,7 @@ def load_and_prepare_datasets(
 
 class InfiniteQADataset(IterableDataset):
     def __init__(self, profiles_dataset, tokenizer, max_seq_len=512, orders=[1,2], subjects=None, 
-                 hop_ratio=0.1, heldout_fraction=0.05, mode="train", heldout_sets=None, seed_offset=0,
+                 hop_ratio=0.1, heldout_fraction=0.1, specific_heldout_fraction=0.02, mode="train", heldout_sets=None, seed_offset=0,
                  debug=False):
         self.profiles = profiles_dataset
         self.tokenizer = tokenizer
@@ -78,7 +68,7 @@ class InfiniteQADataset(IterableDataset):
         if heldout_sets is not None:
             self.heldout_sets = heldout_sets
         else:
-            self._generate_all_heldout_sets(heldout_fraction)
+            self._generate_all_heldout_sets(heldout_fraction, specific_heldout_fraction)
 
         if self.debug:
             self.heldout_sets_for_use = self.heldout_sets
@@ -89,31 +79,116 @@ class InfiniteQADataset(IterableDataset):
         """Allow external epoch updates"""
         self._epoch = epoch
 
-    def _generate_all_heldout_sets(self, fraction):
+    def _generate_all_heldout_sets(self, fraction, specific_heldout_fraction):
         if not dist.is_initialized() or dist.get_rank() == 0:
             n_profiles = len(self.profiles)
             available_relations = get_available_relations(self.profiles[0])
             n_relations = len(available_relations) 
             n_attributes = len(ATTRIBUTES)
 
+            # Store original heldout sets for testing
             self.heldout_sets = {
-                "first_people": sorted(random.sample(range(n_profiles), max(1, int(n_profiles * fraction)))),
-                "relations": sorted(random.sample(available_relations, max(1, int(n_relations * fraction)))),
+                "first_people": sorted(random.sample(range(n_profiles), max(1, int(n_profiles * specific_heldout_fraction)))),
+                "relations": sorted(random.sample(available_relations, max(1, int(n_relations * specific_heldout_fraction)))),
                 "person_relation_pairs": sorted(
                     random.sample([(p, r) for p in range(n_profiles) for r in available_relations], 
-                                max(1, int(n_profiles * n_relations * fraction)))
+                                max(1, int(n_profiles * n_relations * specific_heldout_fraction)))
                 ),
-                "second_people": sorted(random.sample(range(n_profiles), max(1, int(n_profiles * fraction)))),
-                "second_attributes": sorted(random.sample(ATTRIBUTES + available_relations, max(1, int(n_attributes * fraction)))),
+                "second_people": sorted(random.sample(range(n_profiles), max(1, int(n_profiles * specific_heldout_fraction)))),
+                "second_attributes": sorted(random.sample(ATTRIBUTES + available_relations, max(1, int(n_attributes * specific_heldout_fraction)))),
                 "second_person_attribute_pairs": sorted(
                     random.sample([(p, a) for p in range(n_profiles) for a in ATTRIBUTES + available_relations],
-                                max(1, int(n_profiles * n_attributes * fraction)))
-                ),
-                "complete_two_hop_questions": sorted(
-                    random.sample([(p, r, a) for p in range(n_profiles) for r in available_relations for a in available_relations + ATTRIBUTES],
-                                max(1, int(n_profiles * n_relations * n_attributes * fraction)))
+                                max(1, int(n_profiles * n_attributes * specific_heldout_fraction)))
                 )
             }
+
+            available_first_people = list(set(range(n_profiles)) - set(self.heldout_sets["first_people"]))
+
+            # Caching profile indices to avoid repeated lookups
+            print("caching profile indices")
+            profile_indices = {(p, r): self.profiles[p][r]['index'] 
+                             for p in range(n_profiles) 
+                             for r in available_relations}
+            print('cached profile indices')
+
+            available_fp_r_a_sp_tuples = set([(p, r, a, profile_indices[(p, r)]) 
+                                              for p in available_first_people 
+                                              for r in available_relations 
+                                              for a in ATTRIBUTES + available_relations])
+
+            # Calculate tuples for each heldout set
+            relations_tuples = set([(p, r, a, sp)
+                        for (p, r, a, sp) in available_fp_r_a_sp_tuples
+                        if r in self.heldout_sets["relations"]])
+
+            available_fp_r_a_sp_tuples = available_fp_r_a_sp_tuples - relations_tuples
+
+            second_attribute_tuples = set([(p, r, a, sp)
+                                for (p, r, a, sp) in available_fp_r_a_sp_tuples
+                                if a in self.heldout_sets["second_attributes"]])
+
+            available_fp_r_a_sp_tuples = available_fp_r_a_sp_tuples - second_attribute_tuples
+
+            person_relation_tuples = set([(p, r, a, sp)
+                                        for (p, r, a, sp) in available_fp_r_a_sp_tuples
+                                        if (p, r) in self.heldout_sets["person_relation_pairs"]])
+
+            available_fp_r_a_sp_tuples = available_fp_r_a_sp_tuples - person_relation_tuples
+
+            second_people_tuples = set([(p, r, a, sp)
+                                      for (p, r, a, sp) in available_fp_r_a_sp_tuples
+                                      if sp in self.heldout_sets["second_people"]])
+
+            available_fp_r_a_sp_tuples = available_fp_r_a_sp_tuples - second_people_tuples
+
+            second_person_attribute_tuples = set([(p, r, a, sp)
+                                         for (p, r, a, sp) in available_fp_r_a_sp_tuples
+                                         if (sp, a) in self.heldout_sets["second_person_attribute_pairs"]])
+
+            available_fp_r_a_sp_tuples = available_fp_r_a_sp_tuples - second_person_attribute_tuples
+
+            complete_two_hop_tuples = sorted(random.sample(sorted(available_fp_r_a_sp_tuples), 
+                                                                max(1, int(n_profiles * n_relations * n_attributes * fraction))))
+
+            available_fp_r_a_sp_tuples = sorted(set(available_fp_r_a_sp_tuples) - set(complete_two_hop_tuples))
+
+            # Update heldout_sets with all tuple sets
+            self.heldout_sets.update({
+                "person_relation_tuples": sorted(person_relation_tuples),
+                "second_people_tuples": sorted(second_people_tuples),
+                "second_person_attribute_tuples": sorted(second_person_attribute_tuples),
+                "relations_tuples": sorted(relations_tuples),
+                "second_attribute_tuples": sorted(second_attribute_tuples),
+                "complete_two_hop_tuples": sorted(complete_two_hop_tuples),
+                "available_training_tuples": sorted(available_fp_r_a_sp_tuples),
+            })
+
+            num_first_people = (len(self.heldout_sets['first_people']) 
+                                * (len(ATTRIBUTES) + len(available_relations))
+                                * len(available_relations))
+
+            sum_of_lengths = (len(self.heldout_sets['available_training_tuples']) + 
+                              len(self.heldout_sets['person_relation_tuples']) + 
+                              len(self.heldout_sets['second_people_tuples']) + 
+                              len(self.heldout_sets['second_person_attribute_tuples']) + 
+                              len(self.heldout_sets['relations_tuples']) + 
+                              len(self.heldout_sets['second_attribute_tuples']) + 
+                              len(self.heldout_sets['complete_two_hop_tuples']) +
+                              num_first_people)
+
+            full_length = len(profile_indices)*(len(ATTRIBUTES) + len(available_relations))
+
+            print(f"Heldout sets computed. Training tuples: {len(self.heldout_sets['available_training_tuples'])}\n\
+                  Person relation tuples: {len(self.heldout_sets['person_relation_tuples'])}\n\
+                  Second people tuples: {len(self.heldout_sets['second_people_tuples'])}\n\
+                  Second person attribute tuples: {len(self.heldout_sets['second_person_attribute_tuples'])}\n\
+                  Relations tuples: {len(self.heldout_sets['relations_tuples'])}\n\
+                  Second attribute tuples: {len(self.heldout_sets['second_attribute_tuples'])}\n\
+                  Complete two hop tuples: {len(self.heldout_sets['complete_two_hop_tuples'])}\n\
+                  First people tuples: {num_first_people}\n\
+                  Sum: {sum_of_lengths}\n\
+                  Full length: {full_length}")
+
 
         if dist.is_initialized():
             if dist.get_rank() != 0:
@@ -201,17 +276,38 @@ class InfiniteQADataset(IterableDataset):
 
     def generate_qa(self, heldout_sets):
         while True:
-            relation, attribute = None, None
-            if self.mode == "eval_first_people":
-                profile_idx = random.choice(self.heldout_sets["first_people"])
-            elif self.mode == "eval_complete_two_hop_questions":
-                profile_idx, relation, attribute = random.choice(self.heldout_sets["complete_two_hop_questions"])
+            if self.mode == "train":
+                order = random.choices(self.orders, weights=self.order_weights, k=1)[0]
+                if order == 2:
+                    profile_idx, relation, attribute, _ = random.choice(self.heldout_sets["available_training_tuples"])
+                else:
+                    profile_idx = random.choice(self.qa_indices)
+                    relation, attribute = None, None
             else:
-                profile_idx = random.choice(self.qa_indices)
+                order = 2
+                if self.mode == "eval_first_people":
+                    profile_idx = random.choice(self.heldout_sets["first_people"])
+                    relation, attribute = None, None
+                elif self.mode == "eval_complete_two_hop_questions":
+                    profile_idx, relation, attribute, _ = random.choice(self.heldout_sets["complete_two_hop_tuples"])
+                elif self.mode == "eval_second_people":
+                    profile_idx, relation, attribute, _ = random.choice(self.heldout_sets["second_people_tuples"])
+                elif self.mode == "eval_second_attributes":
+                    profile_idx, relation, attribute, _ = random.choice(self.heldout_sets["second_attributes_tuples"])
+                elif self.mode == "eval_person_relation_pairs":
+                    profile_idx, relation, attribute, _ = random.choice(self.heldout_sets["person_relation_tuples"])
+                elif self.mode == "eval_relations":
+                    profile_idx, relation, attribute, _ = random.choice(self.heldout_sets["relations_tuples"])
+                elif self.mode == "eval_second_attributes":
+                    profile_idx, relation, attribute, _ = random.choice(self.heldout_sets["second_attributes_tuples"])
+                elif self.mode == "eval_second_person_attribute_pairs":
+                    profile_idx, relation, attribute, _ = random.choice(self.heldout_sets["second_person_attribute_pairs"])
+                else:
+                    raise ValueError(f"Invalid mode: {self.mode}")
+
             profile = self.profiles[profile_idx]
             
             # Training uses both 1-hop and 2-hop, eval uses only 2-hop
-            order = random.choices(self.orders, weights=self.order_weights, k=1)[0] if self.mode == "train" else 2
             
             question = maybe_generate_question(
                 profile=profile, 
@@ -262,202 +358,49 @@ class InfiniteQADataset(IterableDataset):
         return labels, torch.arange(len(labels[0]))
 
 
-class BatchLoader:
-    def __init__(
-        self,
-        dataset: "JAXQADataset",
-        batch_size: int,
-        num_workers: int = 4,
-        prefetch_size: int = 2
-    ):
-        self.dataset = dataset
-        self.batch_size = batch_size
-        self.num_workers = num_workers
-        self.samples_per_worker = batch_size // num_workers
-        self.prefetch_size = prefetch_size
-        self.queue = queue.Queue(maxsize=prefetch_size)
-        self.stop_event = threading.Event()
+class MultiDataset(IterableDataset):
+    def __init__(self, datasets, weights):
+        """
+        Args:
+            datasets: List of InfiniteQADataset instances
+            weights: List of weights for sampling from each dataset
+        """
+        self.datasets = datasets
+        total_weight = sum(weights)
+        self.weights = [w/total_weight for w in weights]  # Normalize weights
+        self.tokenizer = datasets[0].tokenizer  # Assume all datasets use same tokenizer
+        self.max_seq_len = datasets[0].max_seq_len
+        self.profiles_dataset_index = 0
 
-    def _worker(self, worker_id: int, result_dict: dict) -> None:
-        try:
-            iterator = iter(self.dataset)
-            while not self.stop_event.is_set():
-                worker_inputs = []
-                worker_labels = []
-                worker_positions = []
-                
-                for _ in range(self.samples_per_worker):
-                    sample = next(iterator)
-                    worker_inputs.append(sample["input_ids"])
-                    worker_labels.append(sample["labels"])
-                    worker_positions.append(sample["position_ids"])
-                
-                result_dict[worker_id] = {
-                    "input_ids": worker_inputs,
-                    "labels": worker_labels,
-                    "position_ids": worker_positions
-                }
-                
-                while not self.stop_event.is_set() and worker_id in result_dict:
-                    time.sleep(0.001)
-                    
-        except Exception as e:
-            print(f"Worker {worker_id} exception: {e}")
-            raise e
+    @property
+    def heldout_sets(self):
+        """Return list of heldout_sets from child datasets"""
+        return self.datasets[self.profiles_dataset_index].heldout_sets
+    
+    @property
+    def profiles(self):
+        """Return list of profiles from child datasets"""
+        return self.datasets[self.profiles_dataset_index].profiles
+
+    def __len__(self):
+        return int(min([len(dataset) * sum(self.weights) / self.weights[i] for i, dataset in enumerate(self.datasets)]))
 
     def __iter__(self):
-        self.stop_event.clear()
-        result_dict = {}
+        iterators = [iter(dataset) for dataset in self.datasets]
+        samples_yielded = 0
+        total_samples = len(self)
         
-        with ThreadPoolExecutor(max_workers=self.num_workers) as executor:
-            futures = [
-                executor.submit(self._worker, i, result_dict)
-                for i in range(self.num_workers)
-            ]
-            
+        while samples_yielded < total_samples:
+            dataset_idx = random.choices(range(len(self.datasets)), weights=self.weights, k=1)[0]
             try:
-                while True:
-                    while len(result_dict) < self.num_workers:
-                        time.sleep(0.001)
-                    
-                    all_inputs = []
-                    all_labels = []
-                    all_positions = []
-                    for i in range(self.num_workers):
-                        worker_result = result_dict[i]
-                        all_inputs.extend(worker_result["input_ids"])
-                        all_labels.extend(worker_result["labels"])
-                        all_positions.extend(worker_result["position_ids"])
-                    batch = {
-                        "input_ids": jnp.stack(all_inputs),
-                        "labels": jnp.stack(all_labels),
-                        "position_ids": jnp.stack(all_positions)
-                    }
-                    
-                    result_dict.clear()
-                    
-                    yield batch
-                    
-            except:
-                self.stop_event.set()
-                raise
-            finally:
-                self.stop_event.set()
-                for future in futures:
-                    future.result()
+                sample = next(iterators[dataset_idx])
+                sample['dataset_idx'] = torch.tensor([dataset_idx], dtype=torch.long)
+                yield sample
+                samples_yielded += 1
+            except StopIteration:
+                return  # This will implicitly raise StopIteration
 
-    def __del__(self):
-        self.stop_event.set()
-
-
-# @partial(jax.jit, static_argnums=(1, 2))
-def _create_labels_and_positions_jax(input_ids, answer_sep_tokens, question_sep_tokens):
-    """JIT-compiled version of label creation and position ID generation"""
-    batch_size, seq_len = input_ids.shape
-    mask = jnp.zeros_like(input_ids, dtype=bool)
-    position_ids = jnp.zeros_like(input_ids)
-    
-    # Find sequence boundaries and answer starts
-    ends = input_ids == question_sep_tokens[0]
-    # Shape: (batch_size, num_ends)
-    end_indices = jnp.array([jnp.where(ends[b])[0] for b in range(batch_size)])
-    
-    # Find answer starts
-    starts = jnp.all(jnp.stack([
-        jnp.roll(input_ids, -i, axis=1) == token
-        for i, token in enumerate(answer_sep_tokens)
-    ]), axis=0)
-    # Shape: (batch_size, num_starts)
-    start_indices = jnp.array([jnp.where(starts[b])[0] for b in range(batch_size)])
-    
-    # Process each batch item separately
-    for b in range(batch_size):
-        last_end = 0
-        batch_ends = end_indices[b]
-        batch_starts = start_indices[b]
-        
-        # Create position IDs and labels for this batch item
-        for i in range(len(batch_ends)):
-            end = batch_ends[i]
-            # Set position IDs for this sequence
-            seq_length = end - last_end + 1
-            position_ids = position_ids.at[b, last_end:end+1].set(jnp.arange(seq_length))
-            
-            # Find corresponding answer start for this sequence
-            if i < len(batch_starts):
-                ans_start = batch_starts[i] + len(answer_sep_tokens)
-                if ans_start < end:
-                    mask = mask.at[b, ans_start:end].set(True)
-            
-            last_end = end + 1
-    
-    # Create labels using the mask
-    labels = jnp.where(mask, input_ids, -100)
-    
-    return labels, position_ids
-
-
-class JAXQADataset:
-    def __init__(self, profiles_dataset, tokenizer, max_seq_len=512, orders=[1,2], qa_indices=[], subjects=None, hop_ratio=0.1):
-        self.profiles = profiles_dataset
-        self.tokenizer = tokenizer
-        self.max_seq_len = max_seq_len
-        self.samples_per_yield = (max_seq_len//15)
-        self.orders = orders
-        self.qa_indices = qa_indices
-        self.order_weights = [1/hop_ratio**i for i in range(len(orders))]
-        self.subjects = subjects
-        self.answer_sep_tokens = tokenizer('Answer:', add_special_tokens=False)['input_ids']
-        self.eos_token = tokenizer.eos_token or "<|endoftext|>"
-        self.question_sep_tokens = tokenizer(self.eos_token, add_special_tokens=False)['input_ids']
-
-
-        self._create_labels_and_positions_jit = partial(
-            _create_labels_and_positions_jax,
-            answer_sep_tokens=self.answer_sep_tokens,
-            question_sep_tokens=self.question_sep_tokens,
-        )
-
-    def __iter__(self) -> Iterator[Dict[str, jnp.ndarray]]:
-        while True:
-            texts = []
-            for _ in range(self.samples_per_yield):
-                question = self.generate_qa()
-                texts.append(question)
-            
-            sep = self.tokenizer.eos_token or "<|endoftext|>"
-            joined_text = sep.join(texts)
-            output = self.tokenizer(
-                joined_text,
-                max_length=self.max_seq_len,
-                return_attention_mask=False,
-                truncation=True,
-                return_tensors="pt"
-            )
-            
-            input_ids = jnp.array(output["input_ids"])
-            
-            labels, position_ids = self._create_labels_and_positions_jit(input_ids)
-            
-            yield {
-                "input_ids": input_ids.squeeze(0),
-                "labels": labels.squeeze(0),
-                "position_ids": position_ids.squeeze(0)
-            }
-
-    def generate_qa(self):
-        profile_idx = random.choice(self.qa_indices)
-        profile = self.profiles[profile_idx]
-        order = random.choices(self.orders, weights=self.order_weights, k=1)[0]
-        subject = random.choice(self.subjects) if self.subjects else None
-        question, _ = maybe_generate_question(profile, self.profiles, order, {}, {}, subject)
-        if question:
-            return f"Question: {question['question']} Answer: {question['answer']}"
-        return None
-
-    def get_loader(self, batch_size: int, num_workers: int = 4) -> BatchLoader:
-        return BatchLoader(
-            dataset=self,
-            batch_size=batch_size,
-            num_workers=num_workers
-        )
+    def set_epoch(self, epoch):
+        """Propagate epoch to all datasets"""
+        for dataset in self.datasets:
+            dataset.set_epoch(epoch)

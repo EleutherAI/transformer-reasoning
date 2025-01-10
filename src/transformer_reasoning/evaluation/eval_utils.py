@@ -28,7 +28,8 @@ def get_checkpoints(min_order, max_order, N, num_parameters, wd, relations=None,
 
 def load_eval_results(skip_mode=True):
     files = glob.glob('./results/n*_p*_omin1_omax*_wd0.1_l*_lr0.001_beta10.99_sf*/eval_results.csv') + \
-            glob.glob('./results/n*_p*_omin1_omax*_wd0.1_l*_lr0.001_beta10.99_sf*/eval_results_old.csv')
+            glob.glob('./results/n*_p*_omin1_omax*_wd0.1_l*_lr0.001_beta10.99_sf*/eval_results_old.csv') + \
+            glob.glob('./results/synchronized/n*_p*_omin1_omax*_wd0.1_l*_lr0.001_beta10.99_sf*/eval_results.csv')
     
     dfs = []
     for f in files:

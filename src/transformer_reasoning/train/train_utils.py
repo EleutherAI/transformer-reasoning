@@ -22,26 +22,35 @@ import random
 from schedulefree import AdamWScheduleFree
 from transformers import get_cosine_schedule_with_warmup, get_linear_schedule_with_warmup
 from torch.optim import AdamW as TorchAdamW
+from mup import set_base_shapes, make_base_shapes, MuAdamW
 
 from tqdm import tqdm
 
 from torch.nn.parallel import DistributedDataParallel as DDP
 import torch.distributed as dist
 
-from transformer_reasoning.train.dataset import InfiniteQADataset, load_and_prepare_datasets
-
+from transformer_reasoning.train.dataset import InfiniteQADataset, MultiDataset, load_and_prepare_datasets
+from transformer_reasoning.models.llama_mup import LlamaMuPForCausalLM
+from transformer_reasoning.models.llama_mup_config import LlamaMuPConfig
+from transformer_reasoning.train.schedulefree_mup import MuAdamW_ScheduleFree
+from torch.amp import autocast, GradScaler
 
 def train_single_model(
         model,
         tokenizer,
         args,
+        checkpoint_dir=None,
         output_dir=None,
         curriculum=False,
         n_steps=None,
-        debug=False
+        debug=False,
+        load_dataset_function=load_and_prepare_datasets
         ):
     early_saves = set([int(math.exp(i)) for i in torch.linspace(math.log(100), math.log(100000), 10).tolist()])
     
+    if checkpoint_dir is None:
+        checkpoint_dir = output_dir
+
     # Get rank for distributed training
     is_main_process = True
     if torch.cuda.device_count() > 1 and 'WORLD_SIZE' in os.environ:
@@ -62,8 +71,8 @@ def train_single_model(
     # Create or load optimizer
     start_step = 0
     latest_checkpoint = None
-    if args.resume_from_checkpoint and output_dir:
-        checkpoints = glob.glob(os.path.join(output_dir, "checkpoint-*"))
+    if args.resume_from_checkpoint and checkpoint_dir:
+        checkpoints = glob.glob(os.path.join(checkpoint_dir, "checkpoint-*"))
         if checkpoints:
             if args.checkpoint_number:
                 latest_checkpoint = [c for c in checkpoints if f"checkpoint-{args.checkpoint_number}" in c][0]
@@ -71,7 +80,7 @@ def train_single_model(
                 latest_checkpoint = sorted(checkpoints, key=lambda x: int(x.split("-")[-1]))[-1]
     optimizer, scheduler, start_step, heldout_sets = create_or_load_optimizer(model, args, latest_checkpoint)
     
-    train_dataset = load_and_prepare_datasets(
+    train_dataset = load_dataset_function(
         tokenizer,
         args.N, 
         orders=args.orders, 
@@ -113,7 +122,7 @@ def train_single_model(
         ]
     else:
         eval_modes = []
-    
+
     eval_datasets = {
         mode: InfiniteQADataset(
             profiles_dataset=train_dataset.profiles,
@@ -124,6 +133,20 @@ def train_single_model(
             heldout_sets=train_dataset.heldout_sets
         ) for mode in eval_modes
     }
+
+
+    if isinstance(train_dataset, MultiDataset):
+        eval_modes.append("eval_train_alternative_dataset")
+        train_dataset.profiles_dataset_index = 1
+        eval_datasets["eval_train_alternative_dataset"] = InfiniteQADataset(
+            profiles_dataset=train_dataset.profiles,
+            tokenizer=train_dataset.tokenizer,
+            max_seq_len=args.max_seq_length,
+            orders=[1],
+            mode="train",
+            heldout_sets=train_dataset.heldout_sets
+        )
+        train_dataset.profiles_dataset_index = 0
     
     eval_loaders = {
         mode: DataLoader(
@@ -150,6 +173,15 @@ def train_single_model(
     else:
         pbar = train_loader
 
+    # Create gradient scaler for AMP
+    scaler = GradScaler('cuda')
+    
+    # Load scaler state if resuming from checkpoint
+    if latest_checkpoint:
+        scaler_path = f"{latest_checkpoint}/scaler.pt"
+        if os.path.exists(scaler_path):
+            scaler.load_state_dict(torch.load(scaler_path))
+
     # Training loop
     last_batch = None
     for epoch in range(args.num_epochs):
@@ -164,13 +196,27 @@ def train_single_model(
             last_batch = batch
             batch = {k: v.to(model.device) if hasattr(v, 'to') else v 
                     for k, v in batch.items()}
-            del batch['text']
             
-            outputs = model(**batch)
-            loss = outputs.loss
+            # Get dataset index if it exists (for multi-dataset training)
+            dataset_idx = batch.pop('dataset_idx', None)
+            text = batch.pop('text', None)
             
-            loss.backward()
-            optimizer.step()
+            # Use autocast for mixed precision
+            with autocast('cuda'):
+                outputs = model(**batch)
+                
+                if dataset_idx is not None and hasattr(args, 'dataset2_loss_weight'):
+                    loss_weights = torch.ones_like(dataset_idx, dtype=torch.float)
+                    loss_weights[dataset_idx == 1] = args.dataset2_loss_weight
+                    loss = (outputs.loss * loss_weights.to(model.device)).mean()
+                else:
+                    loss = outputs.loss
+
+            # Replace manual backward with scaled operations
+            scaler.scale(loss).backward()
+            scaler.step(optimizer)
+            scaler.update()
+            
             if scheduler:
                 scheduler.step()
             
@@ -225,6 +271,9 @@ def train_single_model(
                         if scheduler:
                             optimizer_state['scheduler_state_dict'] = scheduler.state_dict()
                         torch.save(optimizer_state, f"{model_path}/optimizer.pt")
+                    
+                        # Save scaler state
+                        torch.save(scaler.state_dict(), f"{model_path}/scaler.pt")
                     
                     # Log results
                     if not debug:
@@ -359,20 +408,52 @@ def calculate_architecture(num_params, n_layers=4):
 
 def create_model_and_tokenizer(num_params, num_layers=4):
     n_layers, hidden_size = calculate_architecture(num_params, num_layers)
+    n_layers_base, hidden_size_base = calculate_architecture(900_000 * 4/num_layers, num_layers)
+    n_layers_delta, hidden_size_delta = calculate_architecture(10_000_000, num_layers)
     
     tokenizer = AutoTokenizer.from_pretrained("EleutherAI/llama_multihop_tokenizer")
     tokenizer.pad_token = tokenizer.eos_token
 
-    config = LlamaConfig(
+    config = LlamaMuPConfig(
         vocab_size=len(tokenizer),
         hidden_size=hidden_size,
         intermediate_size=hidden_size * 4,
         num_hidden_layers=n_layers,
         num_attention_heads=hidden_size // 16,
         max_position_embeddings=2048,
+        attn_mult=1
     )
     
-    model = LlamaForCausalLM(config)
+    config_base = LlamaMuPConfig(
+        vocab_size=len(tokenizer),
+        hidden_size=hidden_size_base,
+        intermediate_size=hidden_size_base * 4,
+        num_hidden_layers=n_layers_base,
+        num_attention_heads=hidden_size_base // 16,
+        max_position_embeddings=2048,
+        attn_mult=1
+    )
+
+    config_delta = LlamaMuPConfig(
+        vocab_size=len(tokenizer),
+        hidden_size=hidden_size_delta,
+        intermediate_size=hidden_size_delta * 4,
+        num_hidden_layers=n_layers_delta,
+        num_attention_heads=hidden_size_delta // 16,
+        max_position_embeddings=2048,
+        attn_mult=1
+    )
+
+    model_base = LlamaMuPForCausalLM(config_base)
+    model_delta = LlamaMuPForCausalLM(config_delta)
+
+    base_shapes = make_base_shapes(model_base, model_delta)
+
+    model = LlamaMuPForCausalLM(config)
+
+    set_base_shapes(model, base_shapes)
+
+    model.apply(model._init_weights)
     
     real_num_params = sum(p.numel() for p in model.parameters()) 
     print(f"Model has {real_num_params} parameters")
@@ -405,7 +486,7 @@ def get_columns_all_equal(dataset: Union[Dataset, DatasetDict]) -> list[str]:
 def create_or_load_optimizer(model, args, checkpoint_path=None):
     """Create a new optimizer or load from checkpoint."""
     if args.optimizer_type == "schedulefree":
-        optimizer = AdamWScheduleFree(
+        optimizer = MuAdamW_ScheduleFree(
             model.parameters(),
             lr=args.lr,
             betas=(args.beta1, 0.999),
@@ -414,7 +495,7 @@ def create_or_load_optimizer(model, args, checkpoint_path=None):
         )
         scheduler = None
     else:  # regular AdamW with cosine or linear scheduler
-        optimizer = TorchAdamW(
+        optimizer = MuAdamW(
             model.parameters(),
             lr=args.lr,
             betas=(args.beta1, 0.999),

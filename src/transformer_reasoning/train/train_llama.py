@@ -6,10 +6,11 @@ from transformers import (
 )
 import glob
 import os
+import subprocess
 
 from transformer_reasoning.train.train_utils import calculate_model_size, create_model_and_tokenizer, train_single_model
 from transformer_reasoning.train.dataset import load_and_prepare_datasets
-
+from transformer_reasoning.models.llama_mup import LlamaMuPForCausalLM
 
 def find_question_end(text, tokenizer):
     # Find the last occurrence of "? "
@@ -21,6 +22,11 @@ def find_question_end(text, tokenizer):
     question_tokens = tokenizer.encode(text[:question_end+1], add_special_tokens=True)
     return len(question_tokens)
 
+def get_git_commit_hash():
+    try:
+        return subprocess.check_output(['git', 'rev-parse', '--short', 'HEAD']).decode('ascii').strip()
+    except:
+        return 'no_git'
 
 def main(args):
     rel_str = f'_r{args.relations}' if args.relations else ''
@@ -30,7 +36,10 @@ def main(args):
     curr_str = "_curr" if args.curriculum else ""
     sf_str = "sf" if args.optimizer_type == "schedulefree" else "adamw"
     hop_str = f"_hr{args.hop_ratio}" if args.hop_ratio != 0.1 else ""
-    output_dir = f"./results/synchronized/n{args.N}_p{real_num_params}_omin{min(args.orders)}_omax{max(args.orders)}_wd{args.wd}_l{args.num_layers}_lr{args.lr}_beta1{args.beta1}_{sf_str}{rel_str}{hop_str}{curr_str}"
+    
+    commit_hash = get_git_commit_hash()
+    experiment_name = f"mup_n{args.N}_p{real_num_params}_omin{min(args.orders)}_omax{max(args.orders)}_wd{args.wd}_l{args.num_layers}_lr{args.lr}_beta1{args.beta1}_{sf_str}{rel_str}{hop_str}{curr_str}"
+    output_dir = os.path.join("./results", commit_hash, experiment_name)
 
     if args.resume_from_checkpoint:
         checkpoints = glob.glob(os.path.join(output_dir, "checkpoint-*"))
@@ -39,13 +48,13 @@ def main(args):
         else:
             latest_checkpoint = [c for c in checkpoints if f"checkpoint-{args.checkpoint_number}" in c][0]
         print(f"Loading model from checkpoint: {latest_checkpoint}")
-        model = LlamaForCausalLM.from_pretrained(latest_checkpoint)
+        model = LlamaMuPForCausalLM.from_pretrained(latest_checkpoint)
 
     model_size_mb = calculate_model_size(real_num_params)
     print(f"Estimated model size: {model_size_mb} MB")
     print(f"Epochs: {args.num_epochs}")
 
-    train_single_model(model, tokenizer, args, output_dir, args.curriculum)
+    train_single_model(model, tokenizer, args, output_dir, output_dir, args.curriculum)
 
     if args.push_to_hub:
         hub_id = f"EleutherAI/llama_multihop_n{args.N}_p{real_num_params}_omin{min(args.orders)}_omax{max(args.orders)}_wd{args.wd}_l{args.num_layers}_lr{args.lr}_beta1{args.beta1}_{sf_str}{rel_str}{hop_str}{curr_str}"
