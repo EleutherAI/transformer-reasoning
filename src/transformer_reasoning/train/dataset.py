@@ -293,15 +293,13 @@ class InfiniteQADataset(IterableDataset):
                 elif self.mode == "eval_second_people":
                     profile_idx, relation, attribute, _ = random.choice(self.heldout_sets["second_people_tuples"])
                 elif self.mode == "eval_second_attributes":
-                    profile_idx, relation, attribute, _ = random.choice(self.heldout_sets["second_attributes_tuples"])
+                    profile_idx, relation, attribute, _ = random.choice(self.heldout_sets["second_attribute_tuples"])
                 elif self.mode == "eval_person_relation_pairs":
                     profile_idx, relation, attribute, _ = random.choice(self.heldout_sets["person_relation_tuples"])
                 elif self.mode == "eval_relations":
                     profile_idx, relation, attribute, _ = random.choice(self.heldout_sets["relations_tuples"])
-                elif self.mode == "eval_second_attributes":
-                    profile_idx, relation, attribute, _ = random.choice(self.heldout_sets["second_attributes_tuples"])
                 elif self.mode == "eval_second_person_attribute_pairs":
-                    profile_idx, relation, attribute, _ = random.choice(self.heldout_sets["second_person_attribute_pairs"])
+                    profile_idx, relation, attribute, _ = random.choice(self.heldout_sets["second_person_attribute_tuples"])
                 else:
                     raise ValueError(f"Invalid mode: {self.mode}")
 
