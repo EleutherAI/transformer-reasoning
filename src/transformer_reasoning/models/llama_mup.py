@@ -18,7 +18,7 @@ from transformers.utils import logging
 from transformers.cache_utils import Cache, StaticCache, DynamicCache
 
 from mup import MuReadout, normal_
-from typing import Optional, Tuple, Unpack, Any, List, Union
+from typing import Optional, Tuple, Any, List, Union
 import torch.nn as nn
 import torch
 
@@ -384,7 +384,7 @@ class LlamaMuPModel(LlamaMuPPreTrainedModel):
         output_hidden_states: Optional[bool] = None,
         return_dict: Optional[bool] = None,
         cache_position: Optional[torch.LongTensor] = None,
-        **flash_attn_kwargs: Unpack[FlashAttentionKwargs],
+        **flash_attn_kwargs: Any,
     ) -> Union[Tuple, BaseModelOutputWithPast]:
         output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
         output_hidden_states = (
@@ -663,7 +663,7 @@ class LlamaMuPForCausalLM(LlamaMuPPreTrainedModel, GenerationMixin):
         return_dict: Optional[bool] = None,
         cache_position: Optional[torch.LongTensor] = None,
         num_logits_to_keep: int = 0,
-        **kwargs: Unpack[KwargsForCausalLM],
+        **kwargs: Any,
     ) -> Union[Tuple, CausalLMOutputWithPast]:
         r"""
         Args:
