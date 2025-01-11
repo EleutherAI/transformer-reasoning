@@ -80,6 +80,9 @@ class InfiniteQADataset(IterableDataset):
         self._epoch = epoch
 
     def _generate_all_heldout_sets(self, fraction, specific_heldout_fraction):
+        if self.orders == [1]:
+            self.heldout_sets = {}
+            return
         if not dist.is_initialized() or dist.get_rank() == 0:
             n_profiles = len(self.profiles)
             available_relations = get_available_relations(self.profiles[0])
@@ -276,7 +279,7 @@ class InfiniteQADataset(IterableDataset):
 
     def generate_qa(self, heldout_sets):
         while True:
-            if self.mode == "train":
+            if self.orders == [1] or self.mode == "train":
                 order = random.choices(self.orders, weights=self.order_weights, k=1)[0]
                 if order == 2:
                     profile_idx, relation, attribute, _ = random.choice(self.heldout_sets["available_training_tuples"])

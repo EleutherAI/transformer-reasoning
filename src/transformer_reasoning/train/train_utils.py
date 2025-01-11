@@ -108,7 +108,7 @@ def train_single_model(
         pin_memory=True
     )
     # Create evaluation datasets using the same held-out sets as train_dataset
-    if not debug:
+    if 2 in args.orders and not debug:
         eval_modes = [
             "train_onehop",
             "train_twohop",
@@ -121,7 +121,7 @@ def train_single_model(
             "eval_complete_two_hop_questions"
         ]
     else:
-        eval_modes = []
+        eval_modes = ["train_onehop"]
 
     eval_datasets = {
         mode: InfiniteQADataset(
@@ -278,7 +278,7 @@ def train_single_model(
                     # Log results
                     if not debug:
                         results_df = pd.DataFrame(results_dicts)
-                        if os.path.exists(f"{output_dir}/eval_results.csv"):
+                        if os.path.exists(f"{output_dir}/eval_results.csv") and 'global_step' in results_df.columns:
                             results_df = results_df[results_df['global_step'] == global_step]
                             results_df.to_csv(f"{output_dir}/eval_results.csv", mode='a', header=False, index=False)
                         else:
