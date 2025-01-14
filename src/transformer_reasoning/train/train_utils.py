@@ -408,8 +408,7 @@ def calculate_architecture(num_params, n_layers=4):
 
 def create_model_and_tokenizer(num_params, num_layers=4):
     n_layers, hidden_size = calculate_architecture(num_params, num_layers)
-    n_layers_base, hidden_size_base = calculate_architecture(900_000 * num_layers/4, num_layers)
-    n_layers_delta, hidden_size_delta = calculate_architecture(10_000_000 * min(2, num_layers/4), num_layers)
+
     
     tokenizer = AutoTokenizer.from_pretrained("EleutherAI/llama_multihop_tokenizer")
     tokenizer.pad_token = tokenizer.eos_token
@@ -423,7 +422,22 @@ def create_model_and_tokenizer(num_params, num_layers=4):
         max_position_embeddings=2048,
         attn_mult=1
     )
+
+    model = LlamaMuPForCausalLM(config)
+
+    set_model_base_shapes(model, num_layers, tokenizer)
+
+    model.apply(model._init_weights)
     
+    real_num_params = sum(p.numel() for p in model.parameters()) 
+    print(f"Model has {real_num_params} parameters")
+
+    return model, tokenizer, real_num_params
+
+def set_model_base_shapes(model, num_layers, tokenizer):
+    n_layers_base, hidden_size_base = calculate_architecture(900_000 * num_layers/4, num_layers)
+    n_layers_delta, hidden_size_delta = calculate_architecture(10_000_000 * min(2, num_layers/4), num_layers)
+
     config_base = LlamaMuPConfig(
         vocab_size=len(tokenizer),
         hidden_size=hidden_size_base,
@@ -448,18 +462,7 @@ def create_model_and_tokenizer(num_params, num_layers=4):
     model_delta = LlamaMuPForCausalLM(config_delta)
 
     base_shapes = make_base_shapes(model_base, model_delta)
-
-    model = LlamaMuPForCausalLM(config)
-
     set_base_shapes(model, base_shapes)
-
-    model.apply(model._init_weights)
-    
-    real_num_params = sum(p.numel() for p in model.parameters()) 
-    print(f"Model has {real_num_params} parameters")
-
-    return model, tokenizer, real_num_params
-
 
 
 def get_columns_all_equal(dataset: Union[Dataset, DatasetDict]) -> list[str]:
