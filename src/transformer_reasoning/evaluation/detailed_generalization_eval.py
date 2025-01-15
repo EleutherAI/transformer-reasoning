@@ -21,13 +21,15 @@ def evaluate_detailed_generalization(model, tokenizer, dataset, output_dir):
     
     # Get all tuples we want to evaluate
     tuples = dataset.heldout_sets["complete_two_hop_tuples"]
-    
+    seen_pairs = set()
+
     # Process tuples in batches
     for i in tqdm(range(0, len(tuples), batch_size), desc="Evaluating generalization"):
         batch_tuples = tuples[i:i + batch_size]
         questions = []
-        
-        # Generate questions for each tuple
+        batch_pairs = []
+
+        # Generate second-order questions for each tuple
         for profile_idx, relation, attribute, second_person_idx in batch_tuples:
             profile = dataset.profiles[profile_idx]
             question = maybe_generate_question(
@@ -40,7 +42,24 @@ def evaluate_detailed_generalization(model, tokenizer, dataset, output_dir):
                 subject=attribute
             )
             questions.append(f"Question: {question['question']} Answer: {question['answer']}")
-        
+
+        len_two_hop = len(questions)
+        # Add to batch pairs
+        for profile_idx, _, attribute, _ in batch_tuples:
+            if (profile_idx, attribute) not in seen_pairs:
+                seen_pairs.add((profile_idx, attribute))
+                profile = dataset.profiles[profile_idx]
+                question = maybe_generate_question(
+                    profile=profile,
+                    profiles=dataset.profiles,
+                    order=1,
+                    mode="eval",
+                    subject=attribute
+                )
+                questions.append(f"Question: {question['question']} Answer: {question['answer']}")
+                seen_pairs.add((profile_idx, attribute))
+                batch_pairs.append((profile_idx, attribute))
+
         # Tokenize batch
         encodings = tokenizer(
             questions,
@@ -98,11 +117,19 @@ def evaluate_detailed_generalization(model, tokenizer, dataset, output_dir):
             # Calculate mean loss per example
             losses = torch.sum(loss, dim=1)
             # Store results
-            for (profile_idx, relation, attribute, second_person_idx), loss in zip(batch_tuples, losses):
+            for (profile_idx, relation, attribute, second_person_idx), loss in zip(batch_tuples, losses[:len_two_hop]):
                 results.append({
                     'first_person': profile_idx,
                     'relation': relation,
                     'second_person': second_person_idx,
+                    'attribute': attribute,
+                    'loss': loss.item()
+                })
+            for (profile_idx, attribute), loss in zip(batch_pairs, losses[len_two_hop:]):
+                results.append({
+                    'first_person': profile_idx,
+                    'relation': None,
+                    'second_person': None,
                     'attribute': attribute,
                     'loss': loss.item()
                 })

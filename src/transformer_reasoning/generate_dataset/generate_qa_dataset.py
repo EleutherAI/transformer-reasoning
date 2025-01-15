@@ -74,6 +74,9 @@ def maybe_generate_question(
             subject=subject.replace('_', ' ')
         )
         answer = related_profile[subject]['name'] if subject in RELATIONS else related_profile[subject]
+    elif subject is not None:
+        question = FIRST_ORDER_TEMPLATE.format(name=name, subject=subject.replace('_', ' '))
+        answer = profile[subject]['name'] if subject in RELATIONS else profile[subject]
 
     else:
         if order == 1:
