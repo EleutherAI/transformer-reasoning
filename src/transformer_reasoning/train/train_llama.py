@@ -8,7 +8,7 @@ import glob
 import os
 import subprocess
 
-from transformer_reasoning.train.train_utils import calculate_model_size, create_model_and_tokenizer, train_single_model
+from transformer_reasoning.train.train_utils import calculate_model_size, create_model_and_tokenizer, train_single_model, set_model_base_shapes
 from transformer_reasoning.train.dataset import load_and_prepare_datasets
 from transformer_reasoning.models.llama_mup import LlamaMuPForCausalLM
 
@@ -49,6 +49,7 @@ def main(args):
             latest_checkpoint = [c for c in checkpoints if f"checkpoint-{args.checkpoint_number}" in c][0]
         print(f"Loading model from checkpoint: {latest_checkpoint}")
         model = LlamaMuPForCausalLM.from_pretrained(latest_checkpoint)
+        set_model_base_shapes(model, args.num_layers, tokenizer)
 
     model_size_mb = calculate_model_size(real_num_params)
     print(f"Estimated model size: {model_size_mb} MB")
