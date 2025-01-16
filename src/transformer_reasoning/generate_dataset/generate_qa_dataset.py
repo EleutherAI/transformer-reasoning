@@ -37,6 +37,35 @@ RELATIONS = [
 def get_available_relations(profile):
     return [rel for rel in RELATIONS if profile.get(rel) and profile[rel]['name']]
 
+def generate_cot_question(
+        profile: Dict, 
+        profiles: Dataset, 
+        order: int, 
+        mode="train", 
+        heldout_sets=None,
+        relation=None,
+        subject=None 
+    ) -> Union[Dict, None]:
+    """Chain of thought version of maybe_generate_question"""
+    result = maybe_generate_question(profile, profiles, order, mode, heldout_sets, relation, subject)
+    if not result or order != 2:  # Only modify 2-hop questions
+        return result
+        
+    # Reconstruct the chain of thought answer
+    name = profile['name']
+    related_profile = profiles[profile[relation]['index']]
+    intermediate_answer = related_profile['name']
+    final_answer = related_profile[subject]['name'] if subject in RELATIONS else related_profile[subject]
+    
+    if isinstance(final_answer, datetime.date):
+        final_answer = final_answer.strftime('%Y-%m-%d')
+    
+    return {
+        "question": result['question'],
+        "answer": f"{name}'s {relation.replace('_', ' ')} is {intermediate_answer}, their {subject.replace('_', ' ')} is {final_answer}",
+        "order": order
+    }
+
 def maybe_generate_question(
         profile: Dict, 
         profiles: Dataset, 

@@ -33,6 +33,7 @@ from transformer_reasoning.train.dataset import InfiniteQADataset, MultiDataset,
 from transformer_reasoning.models.llama_mup import LlamaMuPForCausalLM
 from transformer_reasoning.models.llama_mup_config import LlamaMuPConfig
 from transformer_reasoning.train.schedulefree_mup import MuAdamW_ScheduleFree
+from transformer_reasoning.generate_dataset.generate_qa_dataset import generate_cot_question
 from torch.amp import autocast, GradScaler
 
 def train_single_model(
@@ -80,15 +81,21 @@ def train_single_model(
                 latest_checkpoint = sorted(checkpoints, key=lambda x: int(x.split("-")[-1]))[-1]
     optimizer, scheduler, start_step, heldout_sets = create_or_load_optimizer(model, args, latest_checkpoint)
     
-    train_dataset = load_dataset_function(
-        tokenizer,
-        args.N, 
-        orders=args.orders, 
-        relations=args.relations, 
-        hop_ratio=args.hop_ratio, 
-        heldout_sets=heldout_sets,
-        debug=debug
-    )
+
+    dataset_kwargs = {
+        "tokenizer": tokenizer,
+        "N": args.N, 
+        "orders": args.orders, 
+        "relations": args.relations, 
+        "hop_ratio": args.hop_ratio, 
+        "heldout_sets": heldout_sets,
+        "debug": debug
+    }
+
+    if args.cot_questions:
+        dataset_kwargs["question_generator"] = generate_cot_question
+
+    train_dataset = load_dataset_function(**dataset_kwargs)
 
     if args.curriculum:
         # Start with only 1-hop questions
@@ -123,6 +130,13 @@ def train_single_model(
     else:
         eval_modes = ["train_onehop"]
 
+    if args.cot_questions:
+        additional_eval_kwargs = {
+            "question_generator": generate_cot_question
+        }
+    else:
+        additional_eval_kwargs = {}
+
     eval_datasets = {
         mode: InfiniteQADataset(
             profiles_dataset=train_dataset.profiles,
@@ -130,7 +144,8 @@ def train_single_model(
             max_seq_len=args.max_seq_length,
             orders=[1] if mode == "train_onehop" else [2],
             mode=mode.replace("train_onehop", "train").replace("train_twohop", "train"),
-            heldout_sets=train_dataset.heldout_sets
+            heldout_sets=train_dataset.heldout_sets,
+            **additional_eval_kwargs
         ) for mode in eval_modes
     }
 
@@ -144,7 +159,8 @@ def train_single_model(
             max_seq_len=args.max_seq_length,
             orders=[1],
             mode="train",
-            heldout_sets=train_dataset.heldout_sets
+            heldout_sets=train_dataset.heldout_sets,
+            **additional_eval_kwargs
         )
         train_dataset.profiles_dataset_index = 0
     

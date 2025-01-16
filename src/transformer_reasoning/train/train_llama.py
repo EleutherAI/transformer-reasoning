@@ -9,7 +9,6 @@ import os
 import subprocess
 
 from transformer_reasoning.train.train_utils import calculate_model_size, create_model_and_tokenizer, train_single_model, set_model_base_shapes
-from transformer_reasoning.train.dataset import load_and_prepare_datasets
 from transformer_reasoning.models.llama_mup import LlamaMuPForCausalLM
 
 def find_question_end(text, tokenizer):
@@ -36,9 +35,10 @@ def main(args):
     curr_str = "_curr" if args.curriculum else ""
     sf_str = "sf" if args.optimizer_type == "schedulefree" else "adamw"
     hop_str = f"_hr{args.hop_ratio}" if args.hop_ratio != 0.1 else ""
+    cot_str = "_cot" if args.cot_questions else ""
     
     commit_hash = get_git_commit_hash()
-    experiment_name = f"mup_n{args.N}_p{real_num_params}_omin{min(args.orders)}_omax{max(args.orders)}_wd{args.wd}_l{args.num_layers}_lr{args.lr}_beta1{args.beta1}_{sf_str}{rel_str}{hop_str}{curr_str}"
+    experiment_name = f"mup_n{args.N}_p{real_num_params}_omin{min(args.orders)}_omax{max(args.orders)}_wd{args.wd}_l{args.num_layers}_lr{args.lr}_beta1{args.beta1}_{sf_str}{rel_str}{hop_str}{curr_str}{cot_str}"
     output_dir = os.path.join("./results", commit_hash, experiment_name)
 
     if args.resume_from_checkpoint:
@@ -58,7 +58,7 @@ def main(args):
     train_single_model(model, tokenizer, args, output_dir, output_dir, args.curriculum)
 
     if args.push_to_hub:
-        hub_id = f"EleutherAI/llama_multihop_n{args.N}_p{real_num_params}_omin{min(args.orders)}_omax{max(args.orders)}_wd{args.wd}_l{args.num_layers}_lr{args.lr}_beta1{args.beta1}_{sf_str}{rel_str}{hop_str}{curr_str}"
+        hub_id = f"EleutherAI/llama_multihop_n{args.N}_p{real_num_params}_omin{min(args.orders)}_omax{max(args.orders)}_wd{args.wd}_l{args.num_layers}_lr{args.lr}_beta1{args.beta1}_{sf_str}{rel_str}{hop_str}{curr_str}8Rwz5gQspG7nF2ke"
         model.push_to_hub(hub_id)
         tokenizer.push_to_hub(hub_id)
 
@@ -89,6 +89,7 @@ if __name__ == "__main__":
     parser.add_argument("--relations", type=str, default=None, help="Number of relations in the QA dataset")
     parser.add_argument("--curriculum", action="store_true", help="Use curriculum learning starting with 1-hop only")
     parser.add_argument("--max_seq_length", type=int, default=512, help="Maximum sequence length")
+    parser.add_argument("--cot_questions", action="store_true", help="Use chain of thought questions")
     args = parser.parse_args()
     
     if args.optimizer_type == "adamw" and args.num_training_steps is None:
