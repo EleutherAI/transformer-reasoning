@@ -18,10 +18,10 @@ def tokenwise_loss(inputs, logits):
     return loss
 
 
-def get_checkpoints(min_order, max_order, N, num_parameters, wd, relations=None, hop_ratio=None, layers=4):
-    relations_str = f'_r{relations.lstrip("_r")}' if relations is not None else ''
-    hop_ratio_str = f'_hr{hop_ratio.lstrip("_hr")}' if hop_ratio is not None else ''
-    file_pattern = f'./results/n{N}_p{num_parameters}_omin{min_order}_omax{max_order}_wd{wd}_l{layers}_lr0.001_beta10.99_sf{relations_str}{hop_ratio_str}/*'
+def get_checkpoints(min_order, max_order, N, num_parameters, wd, commit_str, relations=None, layers=4):
+    relations_str = f'_r{str(relations).lstrip("_r")}' if relations is not None else ''
+    file_pattern = f'./results/{commit_str}/mup_n{N}_p{num_parameters}_omin{min_order}'\
+        f'_omax{max_order}_wd{wd}_l{layers}_lr0.001_beta10.99_sf{relations_str}/*'
     files = glob.glob(file_pattern)
     return files
 

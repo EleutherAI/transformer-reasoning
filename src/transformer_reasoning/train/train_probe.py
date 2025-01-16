@@ -1,14 +1,32 @@
 import torch
-from torch.utils.data import DataLoader, random_split
+from torch.utils.data import DataLoader
 from transformers import AutoModelForCausalLM, AutoTokenizer
-from transformer_reasoning.train.train_utils import InfiniteQADataset, get_qa_token_ranges
+from transformer_reasoning.train.train_utils import InfiniteQADataset
 from transformer_reasoning.utils import Classifier
 from transformer_reasoning.evaluation.eval_utils import get_checkpoints
+from transformer_reasoning.generate_dataset.generate_qa_dataset import SECOND_ORDER_TEMPLATE
 import argparse
 from datasets import load_dataset
 from tqdm import tqdm
 import csv
 import os
+
+def generate_probe_question(
+                profile, 
+                profiles, 
+                order,
+                mode,
+                heldout_sets,
+                relation,
+                subject
+            ):
+    answer = profile[relation]['name']
+    return {
+        "question": SECOND_ORDER_TEMPLATE.format(name=profile['name'], relation=relation.replace("_", " "), subject=subject.replace("_", " ")),
+        "answer": answer,
+        "order": order
+    }
+    
 
 def extract_activations(model, batch, layer_idx):
     """Extract activations from a specific layer's residual stream."""
@@ -21,12 +39,32 @@ def extract_activations(model, batch, layer_idx):
     hidden_states = outputs.hidden_states[layer_idx]
     return hidden_states, outputs.logits
 
-def collect_qa_activations(model, dataloader, layer_idx, tokenizer, num_samples=10000, lookback=13):
-    """Collect activations and labels for QA pairs."""
+def get_qa_token_ranges(input_ids, pre_name_tokens, relation_tokens, pre_attribute_token):
+
+    name_ranges = torch.where(input_ids == pre_name_tokens[0])[0] + 1
+    name_ranges = [list(range(i, i+2)) for i in name_ranges]
+    relation_ranges = torch.where(input_ids == pre_attribute_token[0])[0][::2] + 1
+    attribute_ranges = torch.where(input_ids == pre_attribute_token[0])[0][1::2] + 1
+
+    return name_ranges, relation_ranges, attribute_ranges
+
+def collect_qa_activations(
+        model, 
+        dataloader, 
+        layer_idx, 
+        tokenizer, 
+        num_samples=10000,
+        pre_name_tokens=None,
+        relation_tokens=None,
+        pre_attribute_token=None
+    ):
+    """Collect activations and labels for QA pairs, targeting specific token types."""
     device = next(model.parameters()).device
-    # List of lists: each inner list contains activations for one position
-    all_activations = [[] for _ in range(lookback)]
-    all_labels = [[] for _ in range(lookback)]
+    # Separate activations for each token type
+    name_activations = []
+    relation_activations = []
+    attribute_activations = []
+    all_labels = []
     all_model_logits = []
     
     model.eval()
@@ -35,58 +73,59 @@ def collect_qa_activations(model, dataloader, layer_idx, tokenizer, num_samples=
             # Get activations and logits
             hidden_states, logits = extract_activations(model, batch, layer_idx)
             
-            # Find positions where labels != -100 (these are the answer tokens)
+            # Find answer positions (where labels != -100)
             label_positions = batch['labels'] != -100
-            
-            # Find start of answer sequences (where label_positions changes from False to True)
             answer_starts = label_positions & ~torch.roll(label_positions, 1, dims=1)
-            # Set first position to False since roll gives us last position
             answer_starts[:, 0] = False
             
-            # For each sequence in the batch
-            for seq_idx, (seq_labels, seq_activations, seq_logits) in enumerate(zip(batch['labels'], hidden_states, logits)):
-                # Get all answer start positions
+            # Process each sequence
+            for seq_idx, (seq_labels, seq_activations, seq_logits, seq_input_ids) in enumerate(
+                zip(batch['labels'], hidden_states, logits, batch['input_ids'])
+            ):
                 answer_positions = torch.where(answer_starts[seq_idx])[0]
-                
                 if len(answer_positions) == 0:
                     continue
 
-                # Create window of input positions (ans_pos-lookback to ans_pos-1)
-                for ans_pos in answer_positions:
-                    input_positions = torch.arange(ans_pos-lookback, ans_pos)
+                for i, ans_pos in enumerate(answer_positions):
+                    # Get token ranges for this sequence
+                    ranges = get_qa_token_ranges(seq_input_ids, pre_name_tokens, relation_tokens, pre_attribute_token)
                     
-                    # Filter out any positions that would be negative
-                    valid_mask = input_positions >= 0
-                    input_positions = input_positions[valid_mask]
+                    if ranges is None:
+                        continue
+                        
+                    name_ranges, relation_ranges, attribute_ranges = ranges
+
+                    # Collect activations for each token type
+                    name_acts = seq_activations[name_ranges[i]]
+                    relation_acts = seq_activations[relation_ranges[i]]
+                    attribute_acts = seq_activations[attribute_ranges[i]]
                     
-                    # Extract activations and corresponding labels
-                    for pos, in_pos in enumerate(input_positions):
-                        all_activations[pos].append(seq_activations[in_pos].cpu())
-                        all_labels[pos].append(seq_labels[ans_pos].cpu())
-                    
-                    # Store model's logits for the first answer token
+                    name_activations.append(name_acts.reshape(1, -1).cpu())
+                    relation_activations.append(relation_acts.reshape(1, -1).cpu())
+                    attribute_activations.append(attribute_acts.reshape(1, -1).cpu())
+                    all_labels.append(seq_labels[ans_pos].cpu())
                     all_model_logits.append(seq_logits[ans_pos - 1].cpu())
-                
-                if len(all_activations[-1]) >= num_samples:
+                    
+                if len(name_activations) >= num_samples:
                     break
             
-            if len(all_activations[-1]) >= num_samples:
+            if len(name_activations) >= num_samples:
                 break
 
     # Convert to tensors and one-hot encode labels
     num_classes = len(tokenizer)
-    for pos in range(lookback):
-        if all_activations[pos]:  # Check if list is not empty
-            all_activations[pos] = torch.stack(all_activations[pos])
-            labels = torch.stack(all_labels[pos])
-            one_hot = torch.zeros((len(labels), num_classes))
-            one_hot.scatter_(1, labels.unsqueeze(1), 1)
-            all_labels[pos] = one_hot
+    name_activations = torch.concat(name_activations, dim=0)
+    relation_activations = torch.concat(relation_activations, dim=0)
+    attribute_activations = torch.concat(attribute_activations, dim=0)
+    
+    labels = torch.stack(all_labels)
+    one_hot = torch.zeros((len(labels), num_classes))
+    one_hot.scatter_(1, labels.unsqueeze(1), 1)
+    all_labels = one_hot
 
-    # Convert model logits to tensor
-    all_model_logits = torch.stack(all_model_logits) if all_model_logits else None
+    all_model_logits = torch.stack(all_model_logits)
 
-    return all_activations, all_labels, all_model_logits
+    return [name_activations, relation_activations, attribute_activations], all_labels, all_model_logits
 
 def train_and_evaluate_probes(
         train_activations, 
@@ -94,80 +133,120 @@ def train_and_evaluate_probes(
         eval_activations, 
         eval_labels, 
         eval_model_logits, 
-        input_dim, 
         device, 
-        max_iter=1000, 
-        lookback=13
+        max_iter=1000
     ):
-    """Train separate probes for each position and evaluate."""
-    # Train 10 separate probes
+    """Train separate probes for each activation type (name, relation, attribute) and evaluate."""
+    activation_types = ['name', 'relation', 'attribute', 'all']
+    probes = {typ: None for typ in activation_types}
+    train_losses = {typ: [] for typ in activation_types}
+    eval_losses = {typ: [] for typ in activation_types}
+    
+    # Train probes for each activation type
+    for idx, typ in enumerate(activation_types):
+        if typ == 'all':
+            train_features = torch.concat(train_activations, dim=1).to(device)
+        else:
+            train_features = train_activations[idx].to(device)
+        input_dim = train_features.shape[-1]
+        probe = Classifier(input_dim=input_dim, num_classes=train_labels.shape[-1], device=device)
 
-    probes = []
-    train_losses = []
-    for pos in tqdm(range(lookback), desc="Training position-specific probes"):
-        probe = Classifier(input_dim=input_dim, num_classes=train_labels[pos].shape[-1], device=device)
         loss = probe.fit_cv(
-            train_activations[pos].to(device),
-            train_labels[pos].to(device),
+            train_features,
+            train_labels.to(device),
             max_iter=max_iter,
             k=3,
             num_penalties=4,
         )
-        probes.append(probe)
-        train_losses.append(loss)
+        probes[typ] = probe
+        train_losses[typ] = loss
     
-    # Evaluate each probe on the eval set
-    eval_losses = []
-    best_loss_positions = []
-    last_token_losses = []
-    model_losses = []  # Store model's losses
-    uniform_losses = []  # Store uniform distribution losses
-
     # Calculate uniform distribution over first answer tokens
-    all_first_answers = torch.sum(eval_labels[0], dim=0) + torch.sum(train_labels[0], dim=0)
+    all_first_answers = torch.sum(eval_labels, dim=0) + torch.sum(train_labels, dim=0)
     uniform_dist = all_first_answers / torch.sum(all_first_answers)
+    
+    # Evaluate probes
+    for idx, typ in enumerate(activation_types):
+        probe = probes[typ]
+        with torch.no_grad():
+            if typ == 'all':
+                logits = probe(torch.concat(eval_activations, dim=1).to(device))
+            else:
+                logits = probe(eval_activations[idx].to(device))
+            loss = torch.nn.functional.cross_entropy(
+                logits,
+                eval_labels.to(device),
+                reduction='none'
+            )
+            eval_losses[typ] = loss.tolist()
+    
+    # Calculate model and uniform losses in batch
+    model_losses = torch.nn.functional.cross_entropy(
+        eval_model_logits.to(device),
+        eval_labels.to(device),
+        reduction='none'
+    ).tolist()
+    
+    uniform_losses = torch.nn.functional.cross_entropy(
+        uniform_dist.unsqueeze(0).repeat(len(eval_labels), 1).to(device),
+        eval_labels.to(device),
+        reduction='none'
+    ).tolist()
 
-    for sample_idx in range(len(eval_activations[0])):
-        sample_losses = []
-        for pos in range(lookback):
-            probe = probes[pos]
-            with torch.no_grad():
-                logits = probe(eval_activations[pos][sample_idx].unsqueeze(0).to(device))
-                loss = torch.nn.functional.cross_entropy(
-                    logits,
-                    eval_labels[pos][sample_idx].unsqueeze(0).to(device)
-                )
-                sample_losses.append(loss.item())
-        
-        # Calculate model's loss
-        model_loss = torch.nn.functional.cross_entropy(
-            eval_model_logits[sample_idx].unsqueeze(0).to(device),
-            eval_labels[0][sample_idx].unsqueeze(0).to(device)
-        )
-        model_losses.append(model_loss.item())
-        
-        # Calculate uniform distribution loss
-        uniform_loss = torch.nn.functional.cross_entropy(
-            uniform_dist.unsqueeze(0).to(device),
-            eval_labels[0][sample_idx].unsqueeze(0).to(device)
-        )
-        uniform_losses.append(uniform_loss.item())
-        
-        eval_losses.append(min(sample_losses))
-        best_loss_positions.append(len(sample_losses) - sample_losses.index(min(sample_losses)))
-        last_token_losses.append(sample_losses[-1])
-
-    avg_best_loss = sum(eval_losses) / len(eval_losses)
-    avg_best_loss_positions = sum(best_loss_positions) / len(best_loss_positions)
-    avg_last_token_loss = sum(last_token_losses) / len(last_token_losses)
+    # Calculate average losses
+    avg_losses = {
+        typ: sum(eval_losses[typ]) / len(eval_losses[typ]) 
+        for typ in activation_types
+    }
     avg_model_loss = sum(model_losses) / len(model_losses)
     avg_uniform_loss = sum(uniform_losses) / len(uniform_losses)
     
-    return probes, train_losses, eval_losses, avg_best_loss, avg_best_loss_positions, avg_last_token_loss, avg_model_loss, avg_uniform_loss
+    return (
+        probes, 
+        train_losses, 
+        eval_losses, 
+        avg_losses,
+        avg_model_loss, 
+        avg_uniform_loss
+    )
+
+def prepare_token_ids(tokenizer, profiles, relations, attributes):
+    """
+    Prepare token IDs for names, relations, and attributes.
+    Returns tensors of token IDs trimmed to minimum length for each type.
+    """
+    # Tokenize relations (with 's)
+    relation_tokens = [tokenizer(f" {r}'s", add_special_tokens=False)['input_ids'] 
+                      for r in relations]
+    min_relation_len = min(len(t) for t in relation_tokens)
+    relation_ids = torch.tensor([t[:min_relation_len] for t in relation_tokens])
+    
+    # Tokenize attributes
+    attribute_tokens = [tokenizer(f" {a}", add_special_tokens=False)['input_ids'] 
+                       for a in attributes]
+    min_attribute_len = min(len(t) for t in attribute_tokens)
+    attribute_ids = torch.tensor([t[:min_attribute_len] for t in attribute_tokens])
+    
+    # Tokenize names from profiles
+    name_tokens = [tokenizer(f" {p['name']}", add_special_tokens=False)['input_ids'] 
+                  for p in profiles]
+    min_name_len = min(len(t) for t in name_tokens)
+    name_ids = torch.tensor([t[:min_name_len] for t in name_tokens])
+    
+    return name_ids, relation_ids, attribute_ids
 
 def main(args):
     
-    checkpoints = get_checkpoints(1, args.max_train_hops, args.N_profiles, args.n_params, 0.1, args.relations, layers=args.layers)
+    checkpoints = get_checkpoints(
+        1, 
+        args.max_train_hops, 
+        args.N_profiles, 
+        args.n_params, 
+        0.1,
+        args.commit,
+        args.relations, 
+        layers=args.layers
+        )
     checkpoints = [f for f in checkpoints if 'checkpoint-' in f]
     checkpoints.sort(key=lambda x: int(x.split('-')[-1]))
     latest_checkpoint = checkpoints[-1]
@@ -181,9 +260,17 @@ def main(args):
     tokenizer = AutoTokenizer.from_pretrained('EleutherAI/llama_multihop_tokenizer')
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     model = model.to(device)
+    # Import relations and attributes
+    from transformer_reasoning.generate_dataset.generate_qa_dataset import RELATIONS, ATTRIBUTES
+    
     rel_str = f'_r{args.relations}' if args.relations is not None else ''
     # Load dataset
     profiles = load_dataset(f"EleutherAI/profiles_dataset_{args.N_profiles}_uniform{rel_str}", keep_in_memory=True)['train']
+    
+    # Prepare token IDs
+    pre_name_tokens = [tokenizer("What was", add_special_tokens=False)['input_ids'][-1]] # len 1
+    relation_tokens = [i[0] for i in tokenizer(RELATIONS, add_special_tokens=False)['input_ids']] # len 1x4
+    pre_attribute_token = [tokenizer(" parent's", add_special_tokens=False)['input_ids'][-1]] # len 1
     
     # Create dataset for one-hop questions
     dataset = InfiniteQADataset(
@@ -191,7 +278,13 @@ def main(args):
         tokenizer=tokenizer,
         max_seq_len=512,
         orders=[args.hops],
+        question_generator=generate_probe_question
     )
+
+    # First 4 relations are 1 token long, exclude others
+    dataset.heldout_sets['relations'] = RELATIONS[4:]
+
+    dataset._generate_explicit_heldout_sets(0., len(profiles), RELATIONS, len(ATTRIBUTES))
     
     # Create dataloader
     dataloader = DataLoader(
@@ -205,48 +298,44 @@ def main(args):
     results = []
     for layer_idx in range(args.min_layer_idx, args.max_layer_idx + 1):
         print(f"\nProcessing layer {layer_idx}")
-        # Replace args.layer_idx with layer_idx in existing code
         activations, labels, model_logits = collect_qa_activations(
             model, 
             dataloader, 
-            layer_idx,  # Changed from args.layer_idx
+            layer_idx,
             tokenizer,
             args.num_samples,
-            lookback
+            pre_name_tokens=pre_name_tokens,
+            relation_tokens=relation_tokens,
+            pre_attribute_token=pre_attribute_token
         )
         
         # Split into train and eval sets
         train_size = int(0.95 * len(activations[0]))
-        train_activations = [activations[i][:train_size] for i in range(lookback)]
-        eval_activations = [activations[i][train_size:] for i in range(lookback)]
-        train_labels = [labels[i][:train_size] for i in range(lookback)]
-        eval_labels = [labels[i][train_size:] for i in range(lookback)]
+        
+        train_activations = [activations[i][:train_size] for i in range(len(activations))]
+        eval_activations = [activations[i][train_size:] for i in range(len(activations))]
+        train_labels = labels[:train_size]
+        eval_labels = labels[train_size:]
         eval_model_logits = model_logits[train_size:]
 
         # Initialize and train probes
-        input_dim = activations[0].shape[-1]
-        probes, train_losses, eval_losses, avg_best_eval_loss, avg_best_loss_positions, avg_last_token_loss, avg_model_loss, avg_uniform_loss = train_and_evaluate_probes(
+        probes, train_losses, eval_losses, avg_losses, avg_model_loss, avg_uniform_loss = train_and_evaluate_probes(
             train_activations,
             train_labels,
             eval_activations,
             eval_labels,
             eval_model_logits,
-            input_dim,
             device,
             args.max_iter,
-            lookback
         )
         
-        print(f"Average best evaluation loss: {avg_best_eval_loss}")
-        print(f"Average best loss positions: {avg_best_loss_positions}")
-        print(f"Average last token loss: {avg_last_token_loss}")
+        print(f"Average evaluation loss: {avg_losses}")
         print(f"Average model loss: {avg_model_loss}")
         print(f"Average uniform distribution loss: {avg_uniform_loss}")
         
         result = {
             'layer': layer_idx,
-            'avg_best_eval_loss': avg_best_eval_loss,
-            'avg_last_token_loss': avg_last_token_loss,
+            'avg_eval_loss': avg_losses,
             'avg_model_loss': avg_model_loss,
             'avg_uniform_loss': avg_uniform_loss
         }
@@ -258,7 +347,7 @@ def main(args):
         
         # Save probes for this layer with checkpoint name
         torch.save({
-            'probes': [probe.state_dict() for probe in probes],
+            'probes': {name: probe.state_dict() for name, probe in probes.items()},
             'train_losses': train_losses,
             'eval_losses': eval_losses,
             **result
@@ -298,6 +387,8 @@ if __name__ == "__main__":
                       help="Num relations in dataset")
     parser.add_argument("--layers", type=int, default=4,
                       help="Num layers in model")
+    parser.add_argument("--commit", type=str, default=None,
+                      help="Commit hash to use")
     
     args = parser.parse_args()
     main(args)
