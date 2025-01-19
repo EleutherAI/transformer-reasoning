@@ -85,3 +85,32 @@ python src/transformer_reasoning/train/train_probe.py --help
 ```
 
 This will train a probe for each layer and token position in the transformer and evaluate the performance of the transformer on the dataset.
+
+
+
+## Reproducing Multihop Reasoning Scaling Laws Experiments
+
+To run the experiments for Multihop Reasoning Scaling Laws, follow these steps:
+
+1. Determine the model parameters and data sizes we want to test. There are here: [Google Sheet](https://docs.google.com/spreadsheets/d/1MUsLsm5FbKB5U7_cPNWJ9O667XUuzkbwLxGI46ldNWE/edit?gid=416826139#gid=416826139)
+
+2. For each selected combination of `(layers, arg_num_params, n_relationships, Target dataset size)`, use `dataset_entropy` to find the appropriate `N` where:
+   - For `n_relationships = 17`:
+     ```
+     dataset_entropy(load_dataset('EleutherAI/profiles_dataset_250000_uniform_r17')['train'], N)).dataset_entropy_1hop.total_capacity =~ Target dataset size
+     ```
+   - For `n_relationships = 4`:
+     ```python
+     dataset_entropy(load_dataset('EleutherAI/profiles_dataset_25000_uniform')['train'], N)).dataset_entropy_1hop.total_capacity =~ Target dataset size
+     ```
+
+3. For each `N` found in Step 2, use `generate_profiles.py` to generate a profiles dataset with size `N` (and correct `n_relationships`)
+
+4. Run:
+   ```bash
+   TOKENIZERS_PARALLELISM=false CUDA_VISIBLE_DEVICES=<GPU_DEVICES> torchrun --nproc_per_node=<NUM_PROC> --master_port=<PORT> src/transformer_reasoning/train/train_llama.py --num_params <ARG_NUM_PARAMS> --orders 1 --num_layers <LAYERS> --relations <N_RELATIONSHIPS> --N <N>
+   ```
+   Ensuring that port is unique for each run, and `NUM_PROC` = number of `GPU_DEVICES` made available. Ex: if `GPU_DEVICES` = 0,1,2,3 then `NUM_PROC` = 4.
+
+5. Collect results, produce plots and tables.
+
