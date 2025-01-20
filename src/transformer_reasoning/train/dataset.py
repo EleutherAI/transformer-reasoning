@@ -59,7 +59,6 @@ class InfiniteQADataset(IterableDataset):
         self.answer_sep_tokens = tokenizer('Answer:', add_special_tokens=False)['input_ids']
         self.eos_token = tokenizer.eos_token or "<|endoftext|>"
         self.question_sep_tokens = tokenizer(self.eos_token, add_special_tokens=False)['input_ids']
-        self.subjects = subjects
         self._batch_size = None  # Will be set during iteration
         self.mode = mode
         self._epoch = 0
@@ -76,6 +75,11 @@ class InfiniteQADataset(IterableDataset):
             self.heldout_sets_for_use = self.heldout_sets
         else:
             self.heldout_sets_for_use = {k: frozenset(v) for k, v in self.heldout_sets.items()}
+
+        self.subjects = subjects
+        if subjects is not None:
+            self._validate_subjects()
+
 
     def set_epoch(self, epoch):
         """Allow external epoch updates"""
@@ -209,8 +213,37 @@ class InfiniteQADataset(IterableDataset):
                 Sum: {sum_of_lengths}\n\
                 Full length: {full_length}")
 
-
-
+    def _validate_subjects(self):
+        if not self.subjects:
+            raise ValueError("Empty subjects list provided")
+        
+        # For first people eval, all subjects are valid
+        if self.mode == "eval_first_people":
+            available_relations = get_available_relations(self.profiles[0])
+            valid_subjects = set(ATTRIBUTES + available_relations)
+        else:
+            # Get the relevant tuple set based on mode
+            mode_to_tuple_set = {
+                "train": "available_training_tuples",
+                "eval_complete_two_hop_questions": "complete_two_hop_tuples",
+                "eval_second_people": "second_people_tuples",
+                "eval_second_attributes": "second_attribute_tuples",
+                "eval_person_relation_pairs": "person_relation_tuples",
+                "eval_relations": "relations_tuples",
+                "eval_second_person_attribute_pairs": "second_person_attribute_tuples"
+            }
+            
+            tuple_set_name = mode_to_tuple_set.get(self.mode)
+            if tuple_set_name is None:
+                raise ValueError(f"Invalid mode: {self.mode}")
+            
+            # Extract unique attributes from the relevant tuples
+            valid_subjects = {attr for _, _, attr, _ in self.heldout_sets[tuple_set_name]}
+        
+        # Update self.subjects to be intersection with valid_subjects
+        self.subjects = set(self.subjects) & valid_subjects
+        if not self.subjects:
+            raise ValueError(f"No valid subjects for mode {self.mode}. Valid subjects are {valid_subjects}")
 
     def __len__(self):
         # Get DDP info
@@ -319,6 +352,10 @@ class InfiniteQADataset(IterableDataset):
             profile = self.profiles[profile_idx]
             
             # Training uses both 1-hop and 2-hop, eval uses only 2-hop
+
+            if self.subjects is not None:
+                attribute = random.choice(list(self.subjects))
+
             
             question = self.question_generator(
                 profile=profile, 

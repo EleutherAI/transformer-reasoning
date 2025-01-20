@@ -11,10 +11,17 @@ from datasets import load_dataset
 from transformer_reasoning.utils import get_project_root
 from transformer_reasoning.evaluation.measure_entropy import calculate_entropy, calculate_selection_entropy
 from transformer_reasoning.evaluation.eval_utils import load_eval_results
-from transformer_reasoning.evaluation.plot_capacity import cap_vs_N_plot, cap_vs_params_plot
+from transformer_reasoning.evaluation.plot_capacity import cap_vs_N_plot, cap_vs_params_plot, plot_derivatives
 from transformer_reasoning.generate_dataset.generate_profiles import RELATIONSHIP_TYPES
 
 import seaborn as sns
+
+def invert_loss_two_hop(loss, n=100):
+    py = np.exp(-loss)
+
+    px = (1 + np.sqrt(1 - n + n*(n-1)*py)) / n
+
+    return -np.log(px)
 
 def calculate_capacities_average(
         total_losses, 
@@ -27,6 +34,10 @@ def calculate_capacities_average(
         incremental=False
     ):
     """Calculate average capacities for all attributes."""
+
+    if scheme == "2-hop-double":
+        raise ValueError("2-hop-double requires per-attribute capacities")
+
     num_relations = len([r for r in RELATIONSHIP_TYPES if r in entropies])
     qa_multiplier = 1
 
@@ -39,7 +50,7 @@ def calculate_capacities_average(
 
     total_entropy = sum(entropies.values())
     avg_loss = total_losses['all_questions'] 
-    
+
     if total_entropy > avg_loss * len(entropies):
         capacity = (total_entropy - avg_loss * len(entropies)) * \
             qa_multiplier * N + \
@@ -80,6 +91,11 @@ def calculate_capacities_per_attr(
     for attr, entropy in entropies.items():
         label = f"{attr}_capacity"
         qa_loss = per_attribute_losses[attr]
+
+        if scheme == "2-hop-double" and hops == 2:
+            attr_n = 2**(-entropy)
+            qa_loss = invert_loss_two_hop(qa_loss, attr_n)
+
         if attr in RELATIONSHIP_TYPES:
             if entropy > qa_loss:
                 qa_capacity[label] = (entropy - qa_loss) * qa_multiplier * \
@@ -326,6 +342,59 @@ def dataset_entropy(
 
     return dataset_entropy_1hop, dataset_entropy_2hop
 
+def calculate_smoothed_derivative(group, window_size=5, num_points=50):
+    """Calculate smoothed derivatives for the last num_points steps."""
+    # Sort by step number and get the last entries
+    group = group.sort_values('global_step')
+    last_entries = group.tail(num_points)
+    
+    if len(last_entries) < window_size:
+        return pd.DataFrame({'smoothed_derivative': [np.nan], 'step': [np.nan]})
+    
+    results = []
+    # Calculate derivatives using sliding window
+    for i in range(len(last_entries) - window_size + 1):
+        window = last_entries.iloc[i:i+window_size]
+        steps = window['global_step'].values
+        losses = window['loss'].values
+        derivatives = np.gradient(losses, steps)
+        middle_step = steps[len(steps)//2]
+        results.append({
+            'smoothed_derivative': np.mean(derivatives),
+            'step': middle_step
+        })
+    
+    return pd.DataFrame(results)
+
+def create_derivative_table(df):
+    """Create table of smoothed derivatives for each configuration."""
+    results = []
+    # Group by configuration
+    for (n_params, N_profiles, layers, max_train_hops, weight_decay), group in df.groupby([
+        'n_params', 
+        'N_profiles', 
+        'layers', 
+        'max_train_hops',
+        'weight_decay'
+    ]):
+        # Filter for steps > 1e6 and calculate derivatives for this group
+        filtered_group = group[group['global_step'] > 1e6]
+        derivatives = calculate_smoothed_derivative(filtered_group[filtered_group['hops'] == 2])
+        
+        # Add configuration parameters to each row
+        for _, row in derivatives.iterrows():
+            results.append({
+                'n_params': n_params,
+                'N_profiles': N_profiles,
+                'layers': layers,
+                'max_train_hops': max_train_hops,
+                'weight_decay': weight_decay,
+                'smoothed_derivative': row['smoothed_derivative'],
+                'step': row['step']
+            })
+    
+    return pd.DataFrame(results)
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--checkpoint", type=str, default="latest")
@@ -334,10 +403,14 @@ def main():
     parser.add_argument("--relations", type=int, default=None)
     parser.add_argument("--subjectwise", action="store_true")
     parser.add_argument("--skip_mode", action="store_true")
+    parser.add_argument("--commit_hashes", nargs="+", default=[])
     args = parser.parse_args()
 
-    eval_results = load_eval_results(skip_mode=args.skip_mode)
+    eval_results = load_eval_results(skip_mode=args.skip_mode, commit_hashes=args.commit_hashes, subjectwise=args.subjectwise)
     rel_str = f"_r{args.relations}" if args.relations else ""
+
+    if 'subject' not in eval_results.columns:
+        eval_results['subject'] = np.nan
 
     if not args.subjectwise:
         eval_results = eval_results[pd.isna(eval_results['subject'])]
@@ -408,6 +481,16 @@ def main():
     
     # Plot capacity vs norm using all timesteps
     # cap_vs_norm_plot(all_timestep_df, scheme=args.scheme)
+
+    # Create and save derivatives table
+    derivatives_df = create_derivative_table(eval_results)
+    derivatives_df.to_csv(
+        get_project_root() / f'results/loss_derivatives_{args.scheme}_{args.selection_scheme}{rel_str}.csv',
+        index=False
+    )
+    
+    # Plot derivatives
+    plot_derivatives(derivatives_df, scheme=args.scheme, selection_scheme=args.selection_scheme, rel_str=rel_str)
 
 if __name__ == "__main__":
     main()
