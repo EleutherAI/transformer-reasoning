@@ -450,7 +450,7 @@ def create_model_and_tokenizer(num_params, num_layers=4):
 
     return model, tokenizer, real_num_params
 
-def set_model_base_shapes(model, num_layers, tokenizer):
+def set_model_base_shapes(model, num_layers, tokenizer, restore_from_checkpoint=False):
     n_layers_base, hidden_size_base = calculate_architecture(900_000 * num_layers/4, num_layers)
     n_layers_delta, hidden_size_delta = calculate_architecture(10_000_000 * min(2, num_layers/4), num_layers)
 
@@ -478,7 +478,10 @@ def set_model_base_shapes(model, num_layers, tokenizer):
     model_delta = LlamaMuPForCausalLM(config_delta)
 
     base_shapes = make_base_shapes(model_base, model_delta)
-    set_base_shapes(model, base_shapes)
+    if restore_from_checkpoint:
+        set_base_shapes(model, base_shapes, rescale_params=False)
+    else:
+        set_base_shapes(model, base_shapes)
 
 
 def get_columns_all_equal(dataset: Union[Dataset, DatasetDict]) -> list[str]:

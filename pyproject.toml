@@ -15,21 +15,25 @@ classifiers = [
 ]
 
 dependencies = [
-    "torch",
-    "transformers",
-    "datasets",
-    "tensorboard",
-    "tqdm",
-    "openai",
-    "accelerate",
-    "matplotlib",
-    "tokenizers",
-    "schedulefree",
-    "jax",
-    "jaxlib",
-    "flax",
-    "optax",
-    "scipy"
+    "torch==2.5.1",
+    "transformers==4.47.0",
+    "datasets==3.1.0",
+    "tensorboard==2.18.0",
+    "tqdm==4.67.1",
+    "openai==1.57.0",
+    "accelerate==1.2.0",
+    "matplotlib==3.9.3",
+    "tokenizers==0.21.0",
+    "schedulefree==1.4",
+    "jax==0.4.36",
+    "jaxlib==0.4.36",
+    "flax==0.10.2",
+    "optax==0.2.4",
+    "scipy==1.14.1",
+    "seaborn==0.13.2",
+    "mup==1.0.0",
+    "torchvision==0.20.1",
+    "statsmodels==0.14.4"
 ]
 
 requires-python = ">=3.10"

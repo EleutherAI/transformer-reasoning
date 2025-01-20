@@ -36,8 +36,9 @@ def main(args):
     sf_str = "sf" if args.optimizer_type == "schedulefree" else "adamw"
     hop_str = f"_hr{args.hop_ratio}" if args.hop_ratio != 0.1 else ""
     cot_str = "_cot" if args.cot_questions else ""
+    cot_str = "_cot" if args.cot_questions else ""
     
-    commit_hash = get_git_commit_hash()
+    commit_hash = args.commit_hash_override or get_git_commit_hash()
     experiment_name = f"mup_n{args.N}_p{real_num_params}_omin{min(args.orders)}_omax{max(args.orders)}_wd{args.wd}_l{args.num_layers}_lr{args.lr}_beta1{args.beta1}_{sf_str}{rel_str}{hop_str}{curr_str}{cot_str}"
     output_dir = os.path.join("./results", commit_hash, experiment_name)
 
@@ -49,7 +50,7 @@ def main(args):
             latest_checkpoint = [c for c in checkpoints if f"checkpoint-{args.checkpoint_number}" in c][0]
         print(f"Loading model from checkpoint: {latest_checkpoint}")
         model = LlamaMuPForCausalLM.from_pretrained(latest_checkpoint)
-        set_model_base_shapes(model, args.num_layers, tokenizer)
+        set_model_base_shapes(model, args.num_layers, tokenizer, restore_from_checkpoint=True)
 
     model_size_mb = calculate_model_size(real_num_params)
     print(f"Estimated model size: {model_size_mb} MB")
@@ -90,6 +91,7 @@ if __name__ == "__main__":
     parser.add_argument("--curriculum", action="store_true", help="Use curriculum learning starting with 1-hop only")
     parser.add_argument("--max_seq_length", type=int, default=512, help="Maximum sequence length")
     parser.add_argument("--cot_questions", action="store_true", help="Use chain of thought questions")
+    parser.add_argument("--commit_hash_override", type=str, default=None, help="Override commit hash")
     args = parser.parse_args()
     
     if args.optimizer_type == "adamw" and args.num_training_steps is None:

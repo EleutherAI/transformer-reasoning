@@ -1,9 +1,7 @@
 from transformers.models.llama.modeling_llama import (
     LlamaAttention, 
-    LlamaFlashAttention2, 
     apply_rotary_pos_emb, 
     repeat_kv,
-    FlashAttentionKwargs,
     LlamaRMSNorm,
     LlamaMLP,
     LlamaPreTrainedModel,
@@ -218,7 +216,6 @@ class LlamaMuPSdpaAttention(LlamaMuPAttention):
 
 LLAMA_MUP_ATTENTION_CLASSES = {
     "eager": LlamaMuPAttention,
-    "flash_attention_2": LlamaFlashAttention2,
     "sdpa": LlamaMuPSdpaAttention,
 }
 

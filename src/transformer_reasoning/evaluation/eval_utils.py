@@ -26,11 +26,19 @@ def get_checkpoints(min_order, max_order, N, num_parameters, wd, commit_str, rel
     return files
 
 
-def load_eval_results(skip_mode=True):
-    files = glob.glob('./results/n*_p*_omin1_omax*_wd0.1_l*_lr0.001_beta10.99_sf*/eval_results.csv') + \
-            glob.glob('./results/n*_p*_omin1_omax*_wd0.1_l*_lr0.001_beta10.99_sf*/eval_results_old.csv') + \
-            glob.glob('./results/synchronized/n*_p*_omin1_omax*_wd0.1_l*_lr0.001_beta10.99_sf*/eval_results.csv')
-    
+def load_eval_results(skip_mode=True, commit_hashes=[], subjectwise=False):
+
+    if commit_hashes:
+        files = []
+        for commit_hash in commit_hashes:
+            if subjectwise:
+                files += glob.glob(f'./results/{commit_hash}/mup_n*_p*_omin1_omax*_wd0.1_l*_lr0.001_beta10.99_sf*/eval_results_all.csv')
+            else:
+                files += glob.glob(f'./results/{commit_hash}/mup_n*_p*_omin1_omax*_wd0.1_l*_lr0.001_beta10.99_sf*/eval_results.csv')
+    else:
+        files = glob.glob('./results/n*_p*_omin1_omax*_wd0.1_l*_lr0.001_beta10.99_sf*/eval_results.csv') + \
+            glob.glob('./results/mup_n*_p*_omin1_omax*_wd0.1_l*_lr0.001_beta10.99_sf*/eval_results.csv')
+
     dfs = []
     for f in files:
         df = pd.read_csv(f)
@@ -53,6 +61,10 @@ def load_eval_results(skip_mode=True):
         relations = int(params.group(10).lstrip('_r')) if params.group(10) else np.nan
         hop_ratio = int(params.group(11).lstrip('_hr')) if params.group(11) else np.nan
         
+        # Extract commit hash from path if present
+        commit_match = re.search(r'/results/([^/]+)/', f)
+        commit_hash = commit_match.group(1) if commit_match else 'unknown'
+        
         # Add columns
         if 'mode' not in df.columns:
             df['hops'] = [1,2] * (len(df)//2)
@@ -70,6 +82,7 @@ def load_eval_results(skip_mode=True):
         df['n_params'] = n_params
         df['min_train_hops'] = min_train_hops
         df['max_train_hops'] = max_train_hops
+        df['commit_hash'] = commit_hash
         df['currency'] = 'current'
         if 'old' in f:
             df['currency'] = 'old'

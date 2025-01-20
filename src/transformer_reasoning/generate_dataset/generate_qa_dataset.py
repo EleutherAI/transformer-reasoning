@@ -48,7 +48,7 @@ def generate_cot_question(
     ) -> Union[Dict, None]:
     """Chain of thought version of maybe_generate_question"""
     result = maybe_generate_question(profile, profiles, order, mode, heldout_sets, relation, subject)
-    if not result or order != 2:  # Only modify 2-hop questions
+    if not result or order != 2 or relation is None or subject is None:  # Only modify 2-hop questions with valid relation and subject
         return result
         
     # Reconstruct the chain of thought answer

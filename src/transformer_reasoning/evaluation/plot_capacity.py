@@ -3,7 +3,7 @@ import matplotlib.pyplot as plt
 from transformer_reasoning.evaluation.eval_utils import get_project_root
 from transformer_reasoning.generate_dataset.generate_profiles import RELATIONSHIP_TYPES
 import numpy as np
-
+import pandas as pd
 def cap_vs_N_plot(df, scheme=None, selection_scheme=None, rel_str=None, plot_combination=False):
     filtered_df = df.groupby(['N_profiles', 'n_params', 'max_train_hops', 'weight_decay', 'hops']).last().reset_index(drop=False)
     filtered_df = filtered_df[filtered_df['global_step'] >= 700000]
@@ -290,3 +290,40 @@ def get_closest_step_data(df, target, use_normalized=True):
     """For each group, get the row with step count closest to target."""
     step_col = 'normalized_step' if use_normalized else 'global_step'
     return df.iloc[(df[step_col] - target).abs().argsort()].iloc[0]
+
+def plot_derivatives(df, scheme=None, selection_scheme=None, rel_str=None):
+    """Plot derivatives vs parameters for different N values."""
+    plt.figure(figsize=(12, 8))
+    df = df[df['step'] > 2e6]
+    df = df[~pd.isna(df['smoothed_derivative'])]
+    
+    # Convert n_params to categorical and create color palette
+    df['n_params'] = df['n_params'].astype('category')
+    palette = sns.color_palette('deep', n_colors=len(df['n_params'].unique()))
+    
+    # Plot each group with matching colors for points and trend lines
+    for idx, ((n_params, N_profiles), group) in enumerate(df.groupby(['n_params', 'N_profiles'])):
+        sns.regplot(
+            data=group,
+            x='step',
+            y='smoothed_derivative',
+            scatter=True,
+            scatter_kws={'alpha': 0.3, 'marker': f'${N_profiles}$'},  # Use N_profiles as marker
+            line_kws={'linestyle': '--'},
+            color=palette[idx % len(palette)],
+            label=f'N={N_profiles}, params={n_params}',
+            lowess=True
+        )
+    
+    plt.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
+    plt.xscale('log')  # Set x-axis to logarithmic scale
+    plt.xlabel('Step (log scale)')
+    plt.ylabel('Smoothed Loss Derivative')
+    plt.title('Loss Derivative vs Parameters')
+    plt.tight_layout()
+    
+    plt.savefig(
+        get_project_root() / f'results/derivatives_plot_{scheme}_{selection_scheme}{rel_str}.png',
+        bbox_inches='tight'
+    )
+    plt.close()
