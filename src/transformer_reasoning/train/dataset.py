@@ -12,7 +12,6 @@ from transformer_reasoning.utils import get_project_root
 
 
 
-
 def load_and_prepare_datasets(
         tokenizer, 
         N=25000, 
@@ -22,15 +21,12 @@ def load_and_prepare_datasets(
         heldout_sets=None, 
         debug=False,
         question_generator=maybe_generate_question
-        debug=False,
-        question_generator=maybe_generate_question
     ):
 
     relation_str = f'_r{relations}' if relations else ''
     # Load profiles dataset
     profiles = load_dataset(f"EleutherAI/profiles_dataset_{N}_uniform{relation_str}", keep_in_memory=True)['train']
     # Create infinite training dataset
-    train_dataset = InfiniteQADataset(
     train_dataset = InfiniteQADataset(
         profiles_dataset=profiles,
         tokenizer=tokenizer,
@@ -41,8 +37,6 @@ def load_and_prepare_datasets(
         heldout_sets=heldout_sets,
         debug=debug,
         question_generator=question_generator
-        debug=debug,
-        question_generator=question_generator
     )
     
     return train_dataset
@@ -51,7 +45,6 @@ def load_and_prepare_datasets(
 class InfiniteQADataset(IterableDataset):
     def __init__(self, profiles_dataset, tokenizer, max_seq_len=512, orders=[1,2], subjects=None, 
                  hop_ratio=0.1, heldout_fraction=0.1, specific_heldout_fraction=0.02, mode="train", heldout_sets=None, seed_offset=0,
-                 debug=False, question_generator=maybe_generate_question):
                  debug=False, question_generator=maybe_generate_question):
         self.profiles = profiles_dataset
         self.tokenizer = tokenizer
@@ -71,7 +64,6 @@ class InfiniteQADataset(IterableDataset):
         self._epoch = 0
         self._seed_offset = seed_offset
         self.debug = debug
-        self.question_generator = question_generator
         self.question_generator = question_generator
         # Either use provided held-out sets or generate new ones
         if heldout_sets is not None:
@@ -134,30 +126,8 @@ class InfiniteQADataset(IterableDataset):
 
         n_relations = len(available_relations)
 
-            self._generate_explicit_heldout_sets(fraction, n_profiles, available_relations, n_attributes)
-        
-        if dist.is_initialized():
-            if dist.get_rank() != 0:
-                heldout_sets_list = [{}]
-            else:
-                heldout_sets_list = [self.heldout_sets]
-            
-            dist.broadcast_object_list(heldout_sets_list, src=0)
-            self.heldout_sets = heldout_sets_list[0]
-
-    def _generate_explicit_heldout_sets(self, fraction, n_profiles, available_relations, n_attributes):
-
-        n_relations = len(available_relations)
-
-        available_first_people = list(set(range(n_profiles)) - set(self.heldout_sets["first_people"]))
         available_first_people = list(set(range(n_profiles)) - set(self.heldout_sets["first_people"]))
 
-        # Caching profile indices to avoid repeated lookups
-        print("caching profile indices")
-        profile_indices = {(p, r): self.profiles[p][r]['index'] 
-                            for p in range(n_profiles) 
-                            for r in available_relations}
-        print('cached profile indices')
         # Caching profile indices to avoid repeated lookups
         print("caching profile indices")
         profile_indices = {(p, r): self.profiles[p][r]['index'] 
@@ -169,81 +139,43 @@ class InfiniteQADataset(IterableDataset):
                                             for p in available_first_people 
                                             for r in available_relations 
                                             for a in ATTRIBUTES + available_relations])
-        available_fp_r_a_sp_tuples = set([(p, r, a, profile_indices[(p, r)]) 
-                                            for p in available_first_people 
-                                            for r in available_relations 
-                                            for a in ATTRIBUTES + available_relations])
 
-        # Calculate tuples for each heldout set
-        relations_tuples = set([(p, r, a, sp)
-                    for (p, r, a, sp) in available_fp_r_a_sp_tuples
-                    if r in self.heldout_sets["relations"]])
         # Calculate tuples for each heldout set
         relations_tuples = set([(p, r, a, sp)
                     for (p, r, a, sp) in available_fp_r_a_sp_tuples
                     if r in self.heldout_sets["relations"]])
 
         available_fp_r_a_sp_tuples = available_fp_r_a_sp_tuples - relations_tuples
-        available_fp_r_a_sp_tuples = available_fp_r_a_sp_tuples - relations_tuples
 
-        second_attribute_tuples = set([(p, r, a, sp)
-                            for (p, r, a, sp) in available_fp_r_a_sp_tuples
-                            if a in self.heldout_sets["second_attributes"]])
         second_attribute_tuples = set([(p, r, a, sp)
                             for (p, r, a, sp) in available_fp_r_a_sp_tuples
                             if a in self.heldout_sets["second_attributes"]])
 
         available_fp_r_a_sp_tuples = available_fp_r_a_sp_tuples - second_attribute_tuples
-        available_fp_r_a_sp_tuples = available_fp_r_a_sp_tuples - second_attribute_tuples
 
-        person_relation_tuples = set([(p, r, a, sp)
-                                    for (p, r, a, sp) in available_fp_r_a_sp_tuples
-                                    if (p, r) in self.heldout_sets["person_relation_pairs"]])
         person_relation_tuples = set([(p, r, a, sp)
                                     for (p, r, a, sp) in available_fp_r_a_sp_tuples
                                     if (p, r) in self.heldout_sets["person_relation_pairs"]])
 
         available_fp_r_a_sp_tuples = available_fp_r_a_sp_tuples - person_relation_tuples
-        available_fp_r_a_sp_tuples = available_fp_r_a_sp_tuples - person_relation_tuples
 
-        second_people_tuples = set([(p, r, a, sp)
-                                    for (p, r, a, sp) in available_fp_r_a_sp_tuples
-                                    if sp in self.heldout_sets["second_people"]])
         second_people_tuples = set([(p, r, a, sp)
                                     for (p, r, a, sp) in available_fp_r_a_sp_tuples
                                     if sp in self.heldout_sets["second_people"]])
 
         available_fp_r_a_sp_tuples = available_fp_r_a_sp_tuples - second_people_tuples
-        available_fp_r_a_sp_tuples = available_fp_r_a_sp_tuples - second_people_tuples
 
-        second_person_attribute_tuples = set([(p, r, a, sp)
-                                        for (p, r, a, sp) in available_fp_r_a_sp_tuples
-                                        if (sp, a) in self.heldout_sets["second_person_attribute_pairs"]])
         second_person_attribute_tuples = set([(p, r, a, sp)
                                         for (p, r, a, sp) in available_fp_r_a_sp_tuples
                                         if (sp, a) in self.heldout_sets["second_person_attribute_pairs"]])
 
         available_fp_r_a_sp_tuples = available_fp_r_a_sp_tuples - second_person_attribute_tuples
-        available_fp_r_a_sp_tuples = available_fp_r_a_sp_tuples - second_person_attribute_tuples
 
-        complete_two_hop_tuples = sorted(random.sample(sorted(available_fp_r_a_sp_tuples), 
-                                                            max(1, int(n_profiles * n_relations * n_attributes * fraction))))
         complete_two_hop_tuples = sorted(random.sample(sorted(available_fp_r_a_sp_tuples), 
                                                             max(1, int(n_profiles * n_relations * n_attributes * fraction))))
 
         available_fp_r_a_sp_tuples = sorted(set(available_fp_r_a_sp_tuples) - set(complete_two_hop_tuples))
-        available_fp_r_a_sp_tuples = sorted(set(available_fp_r_a_sp_tuples) - set(complete_two_hop_tuples))
 
-        # Update heldout_sets with all tuple sets
-        self.heldout_sets.update({
-            "person_relation_tuples": sorted(person_relation_tuples),
-            "second_people_tuples": sorted(second_people_tuples),
-            "second_person_attribute_tuples": sorted(second_person_attribute_tuples),
-            "relations_tuples": sorted(relations_tuples),
-            "second_attribute_tuples": sorted(second_attribute_tuples),
-            "complete_two_hop_tuples": sorted(complete_two_hop_tuples),
-            "available_training_tuples": sorted(available_fp_r_a_sp_tuples),
-        })
         # Update heldout_sets with all tuple sets
         self.heldout_sets.update({
             "person_relation_tuples": sorted(person_relation_tuples),
@@ -258,18 +190,7 @@ class InfiniteQADataset(IterableDataset):
         num_first_people = (len(self.heldout_sets['first_people']) 
                             * (len(ATTRIBUTES) + len(available_relations))
                             * len(available_relations))
-        num_first_people = (len(self.heldout_sets['first_people']) 
-                            * (len(ATTRIBUTES) + len(available_relations))
-                            * len(available_relations))
 
-        sum_of_lengths = (len(self.heldout_sets['available_training_tuples']) + 
-                            len(self.heldout_sets['person_relation_tuples']) + 
-                            len(self.heldout_sets['second_people_tuples']) + 
-                            len(self.heldout_sets['second_person_attribute_tuples']) + 
-                            len(self.heldout_sets['relations_tuples']) + 
-                            len(self.heldout_sets['second_attribute_tuples']) + 
-                            len(self.heldout_sets['complete_two_hop_tuples']) +
-                            num_first_people)
         sum_of_lengths = (len(self.heldout_sets['available_training_tuples']) + 
                             len(self.heldout_sets['person_relation_tuples']) + 
                             len(self.heldout_sets['second_people_tuples']) + 
@@ -280,18 +201,7 @@ class InfiniteQADataset(IterableDataset):
                             num_first_people)
 
         full_length = len(profile_indices)*(len(ATTRIBUTES) + len(available_relations))
-        full_length = len(profile_indices)*(len(ATTRIBUTES) + len(available_relations))
 
-        print(f"Heldout sets computed. Training tuples: {len(self.heldout_sets['available_training_tuples'])}\n\
-                Person relation tuples: {len(self.heldout_sets['person_relation_tuples'])}\n\
-                Second people tuples: {len(self.heldout_sets['second_people_tuples'])}\n\
-                Second person attribute tuples: {len(self.heldout_sets['second_person_attribute_tuples'])}\n\
-                Relations tuples: {len(self.heldout_sets['relations_tuples'])}\n\
-                Second attribute tuples: {len(self.heldout_sets['second_attribute_tuples'])}\n\
-                Complete two hop tuples: {len(self.heldout_sets['complete_two_hop_tuples'])}\n\
-                First people tuples: {num_first_people}\n\
-                Sum: {sum_of_lengths}\n\
-                Full length: {full_length}")
         print(f"Heldout sets computed. Training tuples: {len(self.heldout_sets['available_training_tuples'])}\n\
                 Person relation tuples: {len(self.heldout_sets['person_relation_tuples'])}\n\
                 Second people tuples: {len(self.heldout_sets['second_people_tuples'])}\n\
