@@ -26,18 +26,18 @@ def get_checkpoints(min_order, max_order, N, num_parameters, wd, commit_str, rel
     return files
 
 
-def load_eval_results(skip_mode=True, commit_hashes=[], subjectwise=False):
+def load_eval_results(skip_mode=True, commit_hashes=[], subjectwise=False, base_path='.'):
 
     if commit_hashes:
         files = []
         for commit_hash in commit_hashes:
             if subjectwise:
-                files += glob.glob(f'./results/{commit_hash}/mup_n*_p*_omin1_omax*_wd0.1_l*_lr0.001_beta10.99_sf*/eval_results_all.csv')
+                files += glob.glob(f'{base_path}/results/{commit_hash}/mup_n*_p*_omin1_omax*_wd0.1_l*_lr0.001_beta10.99_sf*/eval_results_full.csv')
             else:
-                files += glob.glob(f'./results/{commit_hash}/mup_n*_p*_omin1_omax*_wd0.1_l*_lr0.001_beta10.99_sf*/eval_results.csv')
+                files += glob.glob(f'{base_path}/results/{commit_hash}/mup_n*_p*_omin1_omax*_wd0.1_l*_lr0.001_beta10.99_sf*/eval_results.csv')
     else:
-        files = glob.glob('./results/n*_p*_omin1_omax*_wd0.1_l*_lr0.001_beta10.99_sf*/eval_results.csv') + \
-            glob.glob('./results/mup_n*_p*_omin1_omax*_wd0.1_l*_lr0.001_beta10.99_sf*/eval_results.csv')
+        files = glob.glob(f'{base_path}/results/n*_p*_omin1_omax*_wd0.1_l*_lr0.001_beta10.99_sf*/eval_results.csv') + \
+            glob.glob(f'{base_path}/results/mup_n*_p*_omin1_omax*_wd0.1_l*_lr0.001_beta10.99_sf*/eval_results.csv')
 
     dfs = []
     for f in files:
@@ -70,7 +70,7 @@ def load_eval_results(skip_mode=True, commit_hashes=[], subjectwise=False):
             df['hops'] = [1,2] * (len(df)//2)
             df['mode'] = df['hops'].apply(lambda x: 'train_onehop' if x == 1 else 'train_twohop')
         else:
-            df['hops'] = df['mode'].apply(lambda x: 1 if x == 'train_onehop' else 2 if x == 'train_twohop' else np.nan)
+            df['hops'] = df['mode'].apply(lambda x: 1 if x == 'train_onehop' else 2)
         df['lr'] = lr
         df['layers'] = layers
         df['weight_decay'] = weight_decay

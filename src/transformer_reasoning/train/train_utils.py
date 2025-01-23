@@ -9,7 +9,7 @@ import glob
 import numpy as np
 import pandas as pd
 import json
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from typing import TypeVar, Union, List
 from datasets import Dataset, DatasetDict
@@ -56,7 +56,7 @@ def train_single_model(
     is_main_process = True
     if torch.cuda.device_count() > 1 and 'WORLD_SIZE' in os.environ:
         if not dist.is_initialized():
-            dist.init_process_group(backend='nccl')
+            dist.init_process_group(backend='nccl', timeout=timedelta(minutes=30))
         local_rank = dist.get_rank()
         is_main_process = local_rank == 0
         torch.cuda.set_device(local_rank)

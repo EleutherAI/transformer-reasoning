@@ -110,7 +110,7 @@ def maybe_generate_question(
     else:
         if order == 1:
             if mode != "train":  # Eval modes only use 2-hop questions
-                return None
+                raise ValueError("Eval modes only use 2-hop questions")
             
             subject = random.choice(available_subjects)
             question = FIRST_ORDER_TEMPLATE.format(name=name, subject=subject.replace('_', ' '))

@@ -4,6 +4,9 @@ from transformer_reasoning.evaluation.eval_utils import get_project_root
 from transformer_reasoning.generate_dataset.generate_profiles import RELATIONSHIP_TYPES
 import numpy as np
 import pandas as pd
+
+
+
 def cap_vs_N_plot(df, scheme=None, selection_scheme=None, rel_str=None, plot_combination=False):
     filtered_df = df.groupby(['N_profiles', 'n_params', 'max_train_hops', 'weight_decay', 'hops']).last().reset_index(drop=False)
     filtered_df = filtered_df[filtered_df['global_step'] >= 700000]
@@ -18,132 +21,87 @@ def cap_vs_N_plot(df, scheme=None, selection_scheme=None, rel_str=None, plot_com
     
     for param_size in param_sizes:
         plot_df = filtered_df[filtered_df['n_params'] == param_size]
-        max_capacity = 2.2 * param_size
+        max_capacity = 2 * param_size
         
-        if attributes:
-            fig, axes = plt.subplots(9, 2, figsize=(20, 40), sharey='row')
-            plt.subplots_adjust(hspace=0.4)
-            
-            # Plot total capacity in first row
-            for max_ord, ax in zip([1, 2], axes[0]):
-                data = plot_df[plot_df['max_train_hops'] == max_ord]
-                sns.scatterplot(data=data, x='N_profiles', y='total_capacity', style='hops', ax=ax)
-                sns.lineplot(data=data, x='N_profiles', y='total_capacity', style='hops', ax=ax)
-                sns.lineplot(data=data, x='N_profiles', y='baseline_capacity', ax=ax, color='gray', linestyle='--', label='baseline')
-                sns.scatterplot(data=data, x='N_profiles', y='baseline_capacity', ax=ax, color='gray', marker='+', label='baseline')
-                for hop_val in data['hops'].unique():
-                    hop_data = data[data['hops'] == hop_val]
-                    sns.lineplot(data=hop_data, x='N_profiles', y='dataset_entropy', ax=ax, color='red',
-                                linestyle='--' if hop_val == 2 else '-',
+        fig, axes = plt.subplots(1, 2, figsize=(20, 8))
+        
+        for max_ord, ax in zip([1, 2], axes):
+            data = plot_df[plot_df['max_train_hops'] == max_ord]
+            sns.scatterplot(data=data, x='N_profiles', y='total_capacity', style='hops', ax=ax)
+            sns.lineplot(data=data, x='N_profiles', y='total_capacity', style='hops', ax=ax)
+            sns.lineplot(data=data, x='N_profiles', y='baseline_capacity', ax=ax, color='gray', linestyle='--', label='baseline')
+            sns.scatterplot(data=data, x='N_profiles', y='baseline_capacity', ax=ax, color='gray', marker='+', label='baseline')
+            for hop_val in data['hops'].unique():
+                hop_data = data[data['hops'] == hop_val]
+                sns.lineplot(data=hop_data, x='N_profiles', y='dataset_entropy', ax=ax, color='red',
+                            linestyle='--' if hop_val == 2 else '-',
+                            label=f'{hop_val}-hop entropy')
+                sns.scatterplot(data=hop_data, x='N_profiles', y='dataset_entropy', ax=ax, color='red',
+                                marker='o' if hop_val == 2 else 'x',
                                 label=f'{hop_val}-hop entropy')
-                    sns.scatterplot(data=hop_data, x='N_profiles', y='dataset_entropy', ax=ax, color='red',
-                                    marker='o' if hop_val == 2 else 'x',
-                                    label=f'{hop_val}-hop entropy')
-                ax.axhline(y=max_capacity, color='black', linestyle='--', label='est. max capacity')
-                ax.set_ylim(0, max_capacity * 1.1)  # Set y limit with 10% padding
-                ax.legend()
-                ax.set_title(f'Total Capacity - Max Train Hops = {max_ord}')
-                ax.set_xlabel('N profiles')
-                ax.set_ylabel('Capacity (bits)')
+            ax.axhline(y=max_capacity, color='black', linestyle='--', label='est. max capacity')
+            ax.set_ylim(0, max_capacity * 1.5)
+            ax.legend()
+            ax.set_title(f'Total Capacity - Max Train Hops = {max_ord}')
+            ax.set_xlabel('N profiles')
+            ax.set_ylabel('Capacity (bits)')
             
-            # Plot individual attributes
-            for idx, attr in enumerate(attributes, start=1):
-                capacity_col = f'{attr}_capacity'
-                for max_ord, ax in zip([1, 2], axes[idx]):
-                    data = plot_df[plot_df['max_train_hops'] == max_ord]
-                    sns.scatterplot(data=data, x='N_profiles', y=capacity_col, style='hops', ax=ax)
-                    sns.lineplot(data=data, x='N_profiles', y=capacity_col, style='hops', ax=ax)
-                    sns.lineplot(data=data, x='N_profiles', y='baseline_capacity', ax=ax, color='gray', linestyle='--', label='baseline')
-                    for hop_val in data['hops'].unique():
-                        hop_data = data[data['hops'] == hop_val]
-                        sns.lineplot(data=hop_data, x='N_profiles', y='dataset_entropy', ax=ax, color='red',
-                                    linestyle='--' if hop_val == 2 else '-',
-                                    label=f'{hop_val}-hop entropy')
-                    ax.axhline(y=max_capacity, color='black', linestyle='--', label='est. max capacity')
-                    ax.set_ylim(0, max_capacity * 1.1)  # Set y limit with 10% padding
-                    ax.legend()
-                    ax.set_title(f'{attr.replace("_", " ").title()} Capacity - Max Order = {max_ord}')
-                    ax.set_xlabel('N profiles')
-                    ax.set_ylabel('Capacity (bits)')
-            
-            plt.suptitle(f'Capacity vs N (params={param_size})', y=0.995, fontsize=16)
-            plt.savefig(get_project_root() / f'results/capacity_vs_N_params{param_size}_{scheme}_{selection_scheme}{rel_str}.png',
-                       bbox_inches='tight', dpi=300)
-        else:
-            fig, axes = plt.subplots(1, 2, figsize=(20, 8))
-            
-            for max_ord, ax in zip([1, 2], axes):
-                data = plot_df[plot_df['max_train_hops'] == max_ord]
-                sns.scatterplot(data=data, x='N_profiles', y='total_capacity', style='hops', ax=ax)
-                sns.lineplot(data=data, x='N_profiles', y='total_capacity', style='hops', ax=ax)
-                sns.lineplot(data=data, x='N_profiles', y='baseline_capacity', ax=ax, color='gray', linestyle='--', label='baseline')
-                sns.scatterplot(data=data, x='N_profiles', y='baseline_capacity', ax=ax, color='gray', marker='+', label='baseline')
-                for hop_val in data['hops'].unique():
-                    hop_data = data[data['hops'] == hop_val]
-                    sns.lineplot(data=hop_data, x='N_profiles', y='dataset_entropy', ax=ax, color='red',
-                                linestyle='--' if hop_val == 2 else '-',
-                                label=f'{hop_val}-hop entropy')
-                    sns.scatterplot(data=hop_data, x='N_profiles', y='dataset_entropy', ax=ax, color='red',
-                                    marker='o' if hop_val == 2 else 'x',
-                                    label=f'{hop_val}-hop entropy')
-                ax.axhline(y=max_capacity, color='black', linestyle='--', label='est. max capacity')
-                ax.set_ylim(0, max_capacity * 1.5)
-                ax.legend()
-                ax.set_title(f'Total Capacity - Max Train Hops = {max_ord}')
-                ax.set_xlabel('N profiles')
-                ax.set_ylabel('Capacity (bits)')
-            
-            plt.suptitle(f'Capacity vs N (params={param_size})', y=1.02, fontsize=16)
-            plt.savefig(get_project_root() / f'results/total_capacity_vs_N_params{param_size}_{scheme}_{selection_scheme}{rel_str}.png',
-                       bbox_inches='tight', dpi=300)
+        plt.suptitle(f'Capacity vs N (params={param_size})', y=1.02, fontsize=16)
+        plt.savefig(get_project_root() / f'results/total_capacity_vs_N_params{param_size}_{scheme}_{selection_scheme}{rel_str}.png',
+                    bbox_inches='tight', dpi=300)
         
         plt.close()
 
 
-def cap_vs_params_plot(df, scheme=None, selection_scheme=None, rel_str=None):
-    filtered_df = df.groupby(['N_profiles', 'n_params', 'max_train_hops', 'weight_decay', 'hops', 'layers']).last().reset_index(drop=False)
-    filtered_df = filtered_df[filtered_df['global_step'] >= 700000]
+def cap_vs_params_plot(df, scheme=None, selection_scheme=None, rel_str=None, hop=2):
+    filtered_df = df[df['global_step'] >= 700000]
     
-    # Modified filter to include 2.1 hops
     filtered_df = filtered_df[
-        (filtered_df['hops'].isin([2, 2.1])) & 
-        (filtered_df['max_train_hops'] == 2)
+        (filtered_df['hops'] == hop) &
+        (filtered_df['max_train_hops'] == hop)
     ]
     
-
-    # filtered_df['combined_entropy'] = 
     N_sizes = filtered_df['N_profiles'].unique()
-    filtered_df['max_capacity'] = 2.2 * filtered_df['n_params']
+    filtered_df['max_capacity'] = 2 * filtered_df['n_params']
+
+    filtered_df = filtered_df.sort_values(by='global_step', ascending=False).groupby(['N_profiles', 'n_params', 'max_train_hops', 'weight_decay', 'hops', 'layers']).first().reset_index(drop=False)
+    
     for N in N_sizes:
         plot_df = filtered_df[filtered_df['N_profiles'] == N]
         
-        # Create two subplots side by side
-        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(24, 8))
+        fig, ax = plt.subplots(figsize=(12, 8))
         
-        # Plot for 2-hop capacity (left subplot)
-        two_hop_df = plot_df[plot_df['hops'] == 2]
-        sns.scatterplot(data=two_hop_df, x='n_params', y='total_capacity', hue='layers', style='layers', ax=ax1)
-        sns.lineplot(data=two_hop_df, x='n_params', y='total_capacity', hue='layers', ax=ax1)
-        sns.lineplot(data=two_hop_df, x='n_params', y='baseline_capacity', color='gray', linestyle='--', label='baseline', ax=ax1)
-        sns.lineplot(data=two_hop_df, x='n_params', y='dataset_entropy', color='red', linestyle='--', label='2-hop entropy', ax=ax1)
-        sns.lineplot(data=two_hop_df, x='n_params', y='max_capacity', color='black', linestyle='--', label='est. max capacity', ax=ax1)
+        hop_df = plot_df[plot_df['hops'] == hop]
+        sns.scatterplot(data=hop_df, x='n_params', y='total_capacity', hue='layers', style='layers', ax=ax)
+        sns.lineplot(data=hop_df, x='n_params', y='total_capacity', hue='layers', ax=ax)
         
-        # Plot for 2.1-hop capacity (right subplot)
-        combined_hop_df = plot_df[plot_df['hops'] == 2.1]
-        sns.scatterplot(data=combined_hop_df, x='n_params', y='total_capacity', hue='layers', style='layers', ax=ax2)
-        sns.lineplot(data=combined_hop_df, x='n_params', y='total_capacity', hue='layers', ax=ax2)
-        sns.lineplot(data=combined_hop_df, x='n_params', y='baseline_capacity', color='gray', linestyle='--', label='baseline', ax=ax2)
-        # sns.lineplot(data=combined_hop_df, x='n_params', y='dataset_entropy', color='red', linestyle='--', label='combined entropy', ax=ax2)
-        sns.lineplot(data=combined_hop_df, x='n_params', y='max_capacity', color='black', linestyle='--', label='est. max capacity', ax=ax2)
+        # Create dummy data points for reference lines if needed
+        if len(hop_df) == 1:
+            param_val = hop_df['n_params'].iloc[0]
+            dummy_params = [param_val * 0.8, param_val, param_val * 1.2]
+            dummy_df = pd.DataFrame({
+                'n_params': dummy_params,
+                'baseline_capacity': hop_df['baseline_capacity'].iloc[0],
+                'dataset_entropy': hop_df['dataset_entropy'].iloc[0],
+                'max_capacity': np.array(dummy_params) * 2
+            })
+            ref_df = dummy_df
+        else:
+            ref_df = hop_df
+            
+        sns.lineplot(data=ref_df, x='n_params', y='baseline_capacity', color='gray', linestyle='--', label='baseline', ax=ax)
+        sns.lineplot(data=ref_df, x='n_params', y='dataset_entropy', color='red', linestyle='--', label=f'{hop}-hop entropy', ax=ax)
+        sns.lineplot(data=ref_df, x='n_params', y='max_capacity', color='black', linestyle='--', label='est. max capacity', ax=ax)
+        
+        ax.set_xscale('log')
+        ax.set_yscale('log')
+        ax.set_xlabel('Number of Parameters')
+        ax.set_ylabel('Capacity (bits)')
+        ax.set_title(f'{hop}-hop Capacity vs Parameters (N={N})')
+        ax.legend(title='Number of Layers')
 
-        # Configure both subplots
-        for ax, title in zip([ax1, ax2], ['2-hop Capacity', 'Combined 1-hop + 2-hop Capacity']):
-            ax.set_xlabel('Number of Parameters')
-            ax.set_ylabel('Capacity (bits)')
-            ax.set_title(f'{title} vs Parameters (N={N})')
-            ax.legend(title='Number of Layers')
-
-        plt.savefig(get_project_root() / f'results/capacity_vs_params_N{N}_{scheme}_{selection_scheme}{rel_str}.png',
+        fn = get_project_root() / f'results/{hop}hop_capacity_vs_params_N{N}_{scheme}_{selection_scheme}{rel_str}.png'
+        plt.savefig(fn,
                    bbox_inches='tight', dpi=300)
         plt.close()
 
@@ -327,3 +285,60 @@ def plot_derivatives(df, scheme=None, selection_scheme=None, rel_str=None):
         bbox_inches='tight'
     )
     plt.close()
+
+def loss_vs_normalized_capacity_plot(df, scheme=None, selection_scheme=None, rel_str=None):
+    """Plot 2-hop eval loss vs normalized 2-hop capacity and loss, separate plot for each N and layer count."""
+    filtered_df = df[
+        (df['hops'] == 2) &
+        (df['total_capacity'] > 0)
+    ]
+    
+    filtered_df['normalized_content'] = (filtered_df['total_capacity']) / (2 * filtered_df['n_params'])
+    filtered_df['eval_loss'] = filtered_df['eval_loss']/np.log(2)
+    filtered_df['loss'] = filtered_df['loss']/np.log(2)
+    
+    for N in filtered_df['N_profiles'].unique():
+        for layers in filtered_df['layers'].unique():
+            fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(20, 6))
+            
+            plot_df = filtered_df[
+                (filtered_df['N_profiles'] == N) & 
+                (filtered_df['layers'] == layers)
+            ]
+            
+            if len(plot_df) > 0:
+                # First subplot: eval_loss vs normalized capacity
+                sns.scatterplot(
+                    data=plot_df,
+                    x='normalized_content',
+                    y='eval_loss',
+                    hue='n_params',
+                    alpha=0.7,
+                    ax=ax1
+                )
+                ax1.set_xlabel('Normalized Content (content / max capacity)')
+                ax1.set_ylabel('2-hop Evaluation Loss')
+                ax1.set_title(f'Evaluation Loss vs Normalized Capacity (N={N}, layers={layers})')
+                ax1.legend(title='Parameters', bbox_to_anchor=(1.05, 1), loc='upper left')
+                
+                # Second subplot: eval_loss vs loss
+                sns.scatterplot(
+                    data=plot_df,
+                    x='loss',
+                    y='eval_loss',
+                    hue='n_params',
+                    alpha=0.7,
+                    ax=ax2
+                )
+                ax2.set_xlabel('Training Loss')
+                ax2.set_ylabel('2-hop Evaluation Loss')
+                ax2.set_title(f'Evaluation Loss vs Training Loss (N={N}, layers={layers})')
+                ax2.legend(title='Parameters', bbox_to_anchor=(1.05, 1), loc='upper left')
+                
+                plt.tight_layout()
+                plt.savefig(
+                    get_project_root() / f'results/loss_vs_capacity_N{N}_L{layers}_{scheme}_{selection_scheme}{rel_str}.png',
+                    bbox_inches='tight',
+                    dpi=300
+                )
+            plt.close()
