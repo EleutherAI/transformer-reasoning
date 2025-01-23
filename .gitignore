@@ -24,3 +24,4 @@ final_model*
 *.pickle
 *.npy
 *.safetensors
+Miniconda3-latest-Linux-x86_64.sh

@@ -1,0 +1,1 @@
+python -m pdb src/transformer_reasoning/evaluation/measure_capacity.py --commit_hashes 40e1da8 344bde1 ecb2fdc no_git pre_commit_stamp --scheme 2-hop-big-hash --selection_scheme enumerate --relations 17
