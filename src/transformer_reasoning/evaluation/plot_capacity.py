@@ -259,8 +259,13 @@ def plot_derivatives(df, scheme=None, selection_scheme=None, rel_str=None):
     df['n_params'] = df['n_params'].astype('category')
     palette = sns.color_palette('deep', n_colors=len(df['n_params'].unique()))
     
+    df = df[df['hops'] == df['max_train_hops']]
+
     # Plot each group with matching colors for points and trend lines
     for idx, ((n_params, N_profiles), group) in enumerate(df.groupby(['n_params', 'N_profiles'])):
+        if not np.isfinite(group['smoothed_derivative']).all():
+            continue
+
         sns.regplot(
             data=group,
             x='step',

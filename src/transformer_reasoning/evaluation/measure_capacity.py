@@ -362,7 +362,7 @@ def dataset_entropy(
 
     return dataset_entropy_1hop, dataset_entropy_2hop
 
-def calculate_smoothed_derivative(group, window_size=5, num_points=50):
+def calculate_smoothed_derivative(group, window_size=15, num_points=50):
     """Calculate smoothed derivatives for the last num_points steps."""
     # Sort by step number and get the last entries
     group = group.sort_values('global_step')
@@ -390,16 +390,21 @@ def create_derivative_table(df):
     """Create table of smoothed derivatives for each configuration."""
     results = []
     # Group by configuration
-    for (n_params, N_profiles, layers, max_train_hops, weight_decay), group in df.groupby([
+    filtered_df = df[
+        (df['mode'].isin(['train_onehop', 'train_twohop']))
+    ]
+
+    for (n_params, N_profiles, layers, max_train_hops, weight_decay, hops), group in filtered_df.groupby([
         'n_params', 
         'N_profiles', 
         'layers', 
         'max_train_hops',
-        'weight_decay'
+        'weight_decay',
+        'hops'
     ]):
         # Filter for steps > 1e6 and calculate derivatives for this group
         filtered_group = group[group['global_step'] > 1e6]
-        derivatives = calculate_smoothed_derivative(filtered_group[filtered_group['hops'] == 2])
+        derivatives = calculate_smoothed_derivative(filtered_group)
         
         # Add configuration parameters to each row
         for _, row in derivatives.iterrows():
@@ -409,10 +414,12 @@ def create_derivative_table(df):
                 'layers': layers,
                 'max_train_hops': max_train_hops,
                 'weight_decay': weight_decay,
+                'hops': hops,
                 'smoothed_derivative': row['smoothed_derivative'],
                 'step': row['step']
             })
     
+
     return pd.DataFrame(results)
 
 def main():
@@ -512,7 +519,11 @@ def main():
             get_project_root() / f'results/loss_derivatives_{args.scheme}_{args.selection_scheme}{rel_str}.csv',
             index=False
         )
-        
+        latest_derivates_df = derivatives_df.sort_values('step').groupby(['n_params', 'N_profiles', 'hops']).last().reset_index()
+        latest_derivates_df.to_csv(
+            get_project_root() / f'results/loss_derivatives_latest_{args.scheme}_{args.selection_scheme}{rel_str}.csv',
+            index=False
+        )
         # Plot derivatives
         plot_derivatives(derivatives_df, scheme=args.scheme, selection_scheme=args.selection_scheme, rel_str=rel_str)
 
