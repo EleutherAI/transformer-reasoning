@@ -1,0 +1,21 @@
+commit_hashes:
+  - "4219613"
+  - ed25b32
+  - pre_commit_stamp
+N_profiles:
+  - 10000
+  - 15000
+  - 15500
+  - 20000
+  - 24000
+  - 25000
+
+run_steps:
+  - measure_capacity
+
+cmd_options:
+  base_path: "."
+  no_mup: true
+  hops: 1
+  output_dir: "./icml_draft/1_hop_scaling"
+  relations: ['17', '4']

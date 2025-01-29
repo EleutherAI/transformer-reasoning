@@ -1,0 +1,14 @@
+commit_hashes:
+  - 2a8bb77
+  - 40e1da8
+  - 344bde1
+  - ecb2fdc
+  - no_git
+
+run_steps:
+  - measure_capacity
+
+cmd_options:
+  base_path: "."
+  output_dir: "./icml_draft/2_hop_derivatives"
+  relations: [17]
