@@ -9,11 +9,14 @@ N_profiles:
   - 20000
   - 24000
   - 25000
+  - 30000
 
 run_steps:
   - measure_capacity
 
 cmd_options:
+  selection_scheme: enumerate
+  scheme: optimal
   base_path: "."
   no_mup: true
   hops: 1

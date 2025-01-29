@@ -10,7 +10,7 @@ from datasets import load_dataset
 from transformer_reasoning.utils import get_project_root
 from transformer_reasoning.evaluation.measure_entropy import calculate_entropy, calculate_selection_entropy
 from transformer_reasoning.evaluation.eval_utils import load_eval_results
-from transformer_reasoning.evaluation.plot_capacity import cap_vs_N_plot, cap_vs_params_plot, plot_derivatives
+from transformer_reasoning.evaluation.plot_capacity import cap_vs_N_plot, cap_vs_params_plot, plot_derivatives, plot_generalization_gap
 from transformer_reasoning.generate_dataset.generate_profiles import RELATIONSHIP_TYPES
 
 import seaborn as sns
@@ -681,9 +681,26 @@ def main():
     )
 
     # Generate plots - now using dynamic rel_str
-    cap_vs_N_plot(all_timestep_df, scheme=args.scheme, selection_scheme=args.selection_scheme, rel_str=rel_str, output_dir=args.output_dir)
     cap_vs_params_plot(all_timestep_df, scheme=args.scheme, selection_scheme=args.selection_scheme, rel_str=rel_str, hop=args.hops, output_dir=args.output_dir)
+
+    gen_eval_results = load_eval_results(
+        skip_mode=False,
+        subjectwise=False,
+        commit_hashes=args.commit_hashes
+    )
+
+    # Get unique combinations of parameters from all_timestep_df
+    config_filter = all_timestep_df[['n_params', 'layers', 'N_profiles', 'relations', 'commit_hash']].drop_duplicates()
     
+    # Filter combined_results to only include these configurations
+    filtered_results = gen_eval_results.merge(
+        config_filter,
+        on=['n_params', 'layers', 'N_profiles', 'relations', 'commit_hash'],
+        how='inner'
+    )
+    filtered_results = filtered_results[filtered_results['layers']==4]
+
+    plot_generalization_gap(filtered_results, output_dir=args.output_dir)
 
 if __name__ == "__main__":
     main()

@@ -82,6 +82,8 @@ def evaluate_checkpoints(
     
     checkpoints = get_checkpoints(min_order, max_order, N, params, wd, commit_hash, rel_str, layers=layer)
     checkpoint_dirs = [Path(x) for x in checkpoints if os.path.isdir(x)]
+    if len(checkpoint_dirs) == 0:
+        return existing_results if not existing_results.empty else None
     checkpoint_paths = get_checkpoint_paths(checkpoint_dirs[0].parent, timesteps_to_keep_path=timesteps_to_keep_path)   
     if not checkpoint_paths:
         return existing_results if not existing_results.empty else None
@@ -102,6 +104,7 @@ def evaluate_checkpoints(
             try:
                 optimizer_state = torch.load(f"{checkpoint}/optimizer.pt")
                 checkpoint_paths = [str(checkpoint)]
+
                 break
             except (RuntimeError, EOFError, FileNotFoundError):
                 continue
@@ -176,10 +179,15 @@ def evaluate_checkpoints(
         results_dicts = []
         for checkpoint_path in checkpoint_paths:
             if 'eval_results.csv' not in checkpoint_path:
-                print(f"Evaluating checkpoint: {checkpoint_path}, subject: {subject}")
-                    
                 step = int(checkpoint_path.split('-')[-1])
                 
+                # Skip if step already exists in existing results
+                if not existing_results.empty and step in existing_results['global_step'].values:
+                    print(f"Skipping checkpoint {step} - already evaluated")
+                    continue
+                    
+                print(f"Evaluating checkpoint: {checkpoint_path}, subject: {subject}")
+                    
                 model = LlamaMuPForCausalLM.from_pretrained(checkpoint_path).to(device)
                 set_model_base_shapes(model, layer, tokenizer, restore_from_checkpoint=True)
                 

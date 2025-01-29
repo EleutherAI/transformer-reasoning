@@ -12,6 +12,8 @@ run_steps:
 
 # Command line options
 cmd_options:
+  scheme: 2-hop-double
+  selection_scheme: enumerate
   subjectwise: true
   base_path: "."
   compute_histograms: false
