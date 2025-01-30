@@ -27,16 +27,25 @@ from datasets import load_dataset
 import argparse
 import os
 
-def get_checkpoint_paths(model_dir: str, num_checkpoints: int = 20) -> List[Path]:
+def get_checkpoint_paths(model_dir: str, num_checkpoints: int = 20, timesteps_to_keep_path: Optional[str] = None) -> List[Path]:
     """Get evenly spaced checkpoint paths from a directory."""
     all_checkpoints = list(model_dir.glob("checkpoint-*"))
+    # If timesteps file exists, filter checkpoints to only those timesteps
+    if timesteps_to_keep_path and Path(timesteps_to_keep_path).exists():
+        timesteps_df = pd.read_csv(timesteps_to_keep_path)
+        valid_steps = set(timesteps_df['global_step'].astype(int))
+        all_checkpoints = [
+            cp for cp in all_checkpoints 
+            if int(str(cp).split('-')[-1]) in valid_steps
+        ]
+        return all_checkpoints
     
     if len(all_checkpoints) <= num_checkpoints:
         return all_checkpoints
     
     # Get evenly spaced indices
     indices = np.linspace(0, len(all_checkpoints)-1, num_checkpoints, dtype=int)
-    return [all_checkpoints[i] for i in indices]
+    return [str(all_checkpoints[i]) for i in indices]
 
 def evaluate_checkpoints(
     N: int,
@@ -46,18 +55,19 @@ def evaluate_checkpoints(
     wd: float,
     layer: int,
     compute_histograms: bool = False,
-    relation: Optional[str] = None,
+    rel_str: Optional[str] = None,
     latest_only: bool = False,
-    commit_hash: Optional[str] = None
+    commit_hash: Optional[str] = None,
+    output_dir: Optional[str] = "."
 ) -> Union[DataFrame, Tuple[DataFrame, Dict[str, List[float]]]]:
     """Evaluate loss for different tasks across checkpoints."""
     # Load existing results if they exist
     if commit_hash is not None:
-        results_path = f'./results/{commit_hash}/mup_n{N}_p{params}_omin{min_order}_omax{max_order}_wd{wd}_l{layer}_lr0.001_beta10.99_sf{relation}/eval_results_full.csv'
-        save_path = f'./results/{commit_hash}/mup_n{N}_p{params}_omin{min_order}_omax{max_order}_wd{wd}_l{layer}_lr0.001_beta10.99_sf{relation}/eval_results_old.csv'
+        results_path = f'./results/{commit_hash}/mup_n{N}_p{params}_omin{min_order}_omax{max_order}_wd{wd}_l{layer}_lr0.001_beta10.99_sf{rel_str}/eval_results_full.csv'
+        save_path = f'./results/{commit_hash}/mup_n{N}_p{params}_omin{min_order}_omax{max_order}_wd{wd}_l{layer}_lr0.001_beta10.99_sf{rel_str}/eval_results_old.csv'
     else:
-        results_path = f'./results/mup_n{N}_p{params}_omin{min_order}_omax{max_order}_wd{wd}_l{layer}_lr0.001_beta10.99_sf{relation}/eval_results_full.csv'
-        save_path = f'./results/mup_n{N}_p{params}_omin{min_order}_omax{max_order}_wd{wd}_l{layer}_lr0.001_beta10.99_sf{relation}/eval_results_old.csv'
+        results_path = f'./results/mup_n{N}_p{params}_omin{min_order}_omax{max_order}_wd{wd}_l{layer}_lr0.001_beta10.99_sf{rel_str}/eval_results_full.csv'
+        save_path = f'./results/mup_n{N}_p{params}_omin{min_order}_omax{max_order}_wd{wd}_l{layer}_lr0.001_beta10.99_sf{rel_str}/eval_results_old.csv'
     existing_results = pd.DataFrame()
     if Path(results_path).exists():
         existing_results = pd.read_csv(results_path)
@@ -67,19 +77,14 @@ def evaluate_checkpoints(
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
     
-    checkpoints = get_checkpoints(min_order, max_order, N, params, wd, commit_hash, relation, layers=layer)
-
-    if not checkpoints:
-        print(f"No checkpoints found for n{N}_p{params}_omin{min_order}_omax{max_order}_wd{wd}_l{layer}_lr0.001_beta10.99_sf{relation}")
-        return existing_results if not existing_results.empty else None
-
-    # Filter checkpoints to only evaluate new ones
-    checkpoint_dirs = [x for x in checkpoints if os.path.isdir(x)]
-    checkpoint_paths = [
-        cp for cp in checkpoint_dirs 
-        if int(str(cp).split('-')[-1]) >= last_step
-    ]
+    # Update checkpoint filtering to use timesteps_to_keep.csv if it exists
+    timesteps_to_keep_path = Path(output_dir) / f'results/timesteps_to_keep{rel_str}.csv'
     
+    checkpoints = get_checkpoints(min_order, max_order, N, params, wd, commit_hash, rel_str, layers=layer)
+    checkpoint_dirs = [Path(x) for x in checkpoints if os.path.isdir(x)]
+    if len(checkpoint_dirs) == 0:
+        return existing_results if not existing_results.empty else None
+    checkpoint_paths = get_checkpoint_paths(checkpoint_dirs[0].parent, timesteps_to_keep_path=timesteps_to_keep_path)   
     if not checkpoint_paths:
         return existing_results if not existing_results.empty else None
 
@@ -89,12 +94,23 @@ def evaluate_checkpoints(
     
     tokenizer = AutoTokenizer.from_pretrained("EleutherAI/llama_multihop_tokenizer")
     tokenizer.pad_token = tokenizer.eos_token
-    profiles_dataset = load_dataset(f"EleutherAI/profiles_dataset_{N}_uniform{relation}")['train']
+    profiles_dataset = load_dataset(f"EleutherAI/profiles_dataset_{N}_uniform{rel_str}")['train']
     
     subjects = ATTRIBUTES + get_available_relations(profiles_dataset[0])
 
     if compute_histograms or latest_only:
-        checkpoint_paths = [max(checkpoint_dirs, key=lambda x: int(str(x).split('-')[-1]))]
+        sorted_checkpoints = sorted(checkpoint_dirs, key=lambda x: int(str(x).split('-')[-1]), reverse=True)
+        for checkpoint in sorted_checkpoints:
+            try:
+                optimizer_state = torch.load(f"{checkpoint}/optimizer.pt")
+                checkpoint_paths = [str(checkpoint)]
+
+                break
+            except (RuntimeError, EOFError, FileNotFoundError):
+                continue
+        else:
+            print("No valid checkpoints with optimizer.pt found")
+            return None
 
     all_results = []
     histograms = {
@@ -161,13 +177,17 @@ def evaluate_checkpoints(
         }
         
         results_dicts = []
-        
         for checkpoint_path in checkpoint_paths:
             if 'eval_results.csv' not in checkpoint_path:
-                print(f"Evaluating checkpoint: {checkpoint_path}, subject: {subject}")
-                    
                 step = int(checkpoint_path.split('-')[-1])
                 
+                # Skip if step already exists in existing results
+                if not existing_results.empty and step in existing_results['global_step'].values:
+                    print(f"Skipping checkpoint {step} - already evaluated")
+                    continue
+                    
+                print(f"Evaluating checkpoint: {checkpoint_path}, subject: {subject}")
+                    
                 model = LlamaMuPForCausalLM.from_pretrained(checkpoint_path).to(device)
                 set_model_base_shapes(model, layer, tokenizer, restore_from_checkpoint=True)
                 
@@ -303,24 +323,24 @@ def plot_losses(all_results: DataFrame, save_path: Optional[str] = None):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--relations", type=int, default=None)
-    parser.add_argument("--subjectwise", action="store_true")
     parser.add_argument("--skip_mode", action="store_true")
     parser.add_argument("--commit_hashes", nargs="+", default=[])
     parser.add_argument('--compute_histograms', action='store_true')
     parser.add_argument('--latest_only', action='store_true')
+    parser.add_argument("--no_mup", action="store_true")
+    parser.add_argument("--base_path", type=str, default=".")
+    parser.add_argument("--output_dir", type=str, default=".")
     args = parser.parse_args()
 
     # Load eval results to get model configurations
-    eval_results = load_eval_results(skip_mode=args.skip_mode, commit_hashes=args.commit_hashes)
-    rel_str = f"_r{args.relations}" if args.relations else ""
+    eval_results = load_eval_results(skip_mode=args.skip_mode, 
+                                     commit_hashes=args.commit_hashes, 
+                                     base_path=args.base_path,
+                                     no_mup=args.no_mup)
+    rel_str = f"_r{args.relations}" if args.relations and args.relations != 4 else ""
 
     if 'subject' not in eval_results.columns:
         eval_results['subject'] = np.nan
-
-    if not args.subjectwise:
-        eval_results = eval_results[pd.isna(eval_results['subject'])]
-    else:
-        eval_results = eval_results[~pd.isna(eval_results['subject'])]
 
     if args.relations is not None:
         eval_results = eval_results[eval_results['relations'] == args.relations]
@@ -351,20 +371,29 @@ def main():
             layer=config['layers'],
             commit_hash=config['commit_hash'],
             compute_histograms=args.compute_histograms,
-            relation=rel_str,
-            latest_only=args.latest_only
+            rel_str=rel_str,
+            latest_only=args.latest_only,
+            output_dir=args.output_dir
         )
         
         if result is not None:
             if args.compute_histograms:
                 df, histograms = result
                 hist_df = pd.DataFrame(histograms)
-                save_path = f'./results/{config["commit_hash"]}/mup_n{config["N_profiles"]}_p{config["n_params"]}_omin{config["min_train_hops"]}_omax{config["max_train_hops"]}_wd{config["weight_decay"]}_l{config["layers"]}_lr0.001_beta10.99_sf{rel_str}'
+                save_path = f'./results/{config["commit_hash"]}/'\
+                    + f'mup_n{config["N_profiles"]}_p{config["n_params"]}_'\
+                    + f'omin{config["min_train_hops"]}_omax{config["max_train_hops"]}_'\
+                    + f'wd{config["weight_decay"]}_l{config["layers"]}_'\
+                    + f'lr0.001_beta10.99_sf{rel_str}'
                 Path(save_path).mkdir(parents=True, exist_ok=True)
                 hist_df.to_csv(f'{save_path}/eval_results_histograms.csv')
                 all_histograms.append(hist_df)
             else:
-                save_path = f'./results/{config["commit_hash"]}/mup_n{config["N_profiles"]}_p{config["n_params"]}_omin{config["min_train_hops"]}_omax{config["max_train_hops"]}_wd{config["weight_decay"]}_l{config["layers"]}_lr0.001_beta10.99_sf{rel_str}'
+                save_path = f'./results/{config["commit_hash"]}/'\
+                    + f'mup_n{config["N_profiles"]}_p{config["n_params"]}_'\
+                    + f'omin{config["min_train_hops"]}_omax{config["max_train_hops"]}_'\
+                    + f'wd{config["weight_decay"]}_l{config["layers"]}_'\
+                    + f'lr0.001_beta10.99_sf{rel_str}'
                 Path(save_path).mkdir(parents=True, exist_ok=True)
                 result.to_csv(f'{save_path}/eval_results_full.csv')
                 full_results.append(result)

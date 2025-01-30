@@ -4,10 +4,38 @@ from transformer_reasoning.evaluation.eval_utils import get_project_root
 from transformer_reasoning.generate_dataset.generate_profiles import RELATIONSHIP_TYPES
 import numpy as np
 import pandas as pd
+from pathlib import Path
+import matplotlib as mpl
 
+mpl.rcParams.update({
+    "text.usetex": True,
+    "font.family": "serif",
+    "font.serif": ["Computer Modern Roman"],
+})
 
+SMALL_SIZE = 8
+MEDIUM_SIZE = 10
+BIGGER_SIZE = 12
 
-def cap_vs_N_plot(df, scheme=None, selection_scheme=None, rel_str=None, plot_combination=False):
+plt.rc('font', size=SMALL_SIZE)          # controls default text sizes
+plt.rc('axes', titlesize=MEDIUM_SIZE)    # fontsize of the axes title
+plt.rc('axes', labelsize=SMALL_SIZE)     # fontsize of the x and y labels
+plt.rc('xtick', labelsize=SMALL_SIZE)    # fontsize of the tick labels
+plt.rc('ytick', labelsize=SMALL_SIZE)    # fontsize of the tick labels
+plt.rc('legend', fontsize=SMALL_SIZE)    # legend fontsize
+plt.rc('figure', titlesize=BIGGER_SIZE)  # fontsize of the figure title
+
+# Paper sizes in inches
+SINGLE_COLUMN = 3.5
+DOUBLE_COLUMN = 7.2
+ASPECT_RATIO = 0.75  # height = width * aspect_ratio
+
+# Common figure sizes
+SINGLE_FIG = (SINGLE_COLUMN, SINGLE_COLUMN * ASPECT_RATIO)
+DOUBLE_FIG = (DOUBLE_COLUMN, DOUBLE_COLUMN * ASPECT_RATIO)
+WIDE_FIG = (DOUBLE_COLUMN, SINGLE_COLUMN)  # For side-by-side plots
+
+def cap_vs_N_plot(df, scheme=None, selection_scheme=None, rel_str=None, plot_combination=False, output_dir=None):
     filtered_df = df.groupby(['N_profiles', 'n_params', 'max_train_hops', 'weight_decay', 'hops']).last().reset_index(drop=False)
     filtered_df = filtered_df[filtered_df['global_step'] >= 700000]
     param_sizes = filtered_df['n_params'].unique()
@@ -23,7 +51,7 @@ def cap_vs_N_plot(df, scheme=None, selection_scheme=None, rel_str=None, plot_com
         plot_df = filtered_df[filtered_df['n_params'] == param_size]
         max_capacity = 2 * param_size
         
-        fig, axes = plt.subplots(1, 2, figsize=(20, 8))
+        fig, axes = plt.subplots(1, 2, figsize=WIDE_FIG)
         
         for max_ord, ax in zip([1, 2], axes):
             data = plot_df[plot_df['max_train_hops'] == max_ord]
@@ -47,13 +75,16 @@ def cap_vs_N_plot(df, scheme=None, selection_scheme=None, rel_str=None, plot_com
             ax.set_ylabel('Capacity (bits)')
             
         plt.suptitle(f'Capacity vs N (params={param_size})', y=1.02, fontsize=16)
-        plt.savefig(get_project_root() / f'results/total_capacity_vs_N_params{param_size}_{scheme}_{selection_scheme}{rel_str}.png',
-                    bbox_inches='tight', dpi=300)
+        plt.savefig(
+            Path(output_dir or get_project_root()) / f'results/total_capacity_vs_N_params{param_size}_{scheme}_{selection_scheme}{rel_str}.pdf',
+            bbox_inches='tight', 
+            format='pdf'
+        )
         
         plt.close()
 
 
-def cap_vs_params_plot(df, scheme=None, selection_scheme=None, rel_str=None, hop=2):
+def cap_vs_params_plot(df, scheme=None, selection_scheme=None, rel_str=None, hop=2, output_dir=None):
     filtered_df = df[df['global_step'] >= 700000]
     
     filtered_df = filtered_df[
@@ -64,12 +95,18 @@ def cap_vs_params_plot(df, scheme=None, selection_scheme=None, rel_str=None, hop
     N_sizes = filtered_df['N_profiles'].unique()
     filtered_df['max_capacity'] = 2 * filtered_df['n_params']
 
-    filtered_df = filtered_df.sort_values(by='global_step', ascending=False).groupby(['N_profiles', 'n_params', 'max_train_hops', 'weight_decay', 'hops', 'layers']).first().reset_index(drop=False)
+    filtered_df = filtered_df.sort_values(by='global_step', ascending=False).groupby(
+        ['N_profiles', 'n_params', 'max_train_hops', 'weight_decay', 'hops', 'layers', 'commit_hash']
+    ).first().reset_index(drop=False)
     
+    if len(filtered_df) == 0:
+        return
+
+    # Original per-N plots
     for N in N_sizes:
         plot_df = filtered_df[filtered_df['N_profiles'] == N]
         
-        fig, ax = plt.subplots(figsize=(12, 8))
+        fig, ax = plt.subplots(figsize=SINGLE_FIG)
         
         hop_df = plot_df[plot_df['hops'] == hop]
         sns.scatterplot(data=hop_df, x='n_params', y='total_capacity', hue='layers', style='layers', ax=ax)
@@ -100,15 +137,59 @@ def cap_vs_params_plot(df, scheme=None, selection_scheme=None, rel_str=None, hop
         ax.set_title(f'{hop}-hop Capacity vs Parameters (N={N})')
         ax.legend(title='Number of Layers')
 
-        fn = get_project_root() / f'results/{hop}hop_capacity_vs_params_N{N}_{scheme}_{selection_scheme}{rel_str}.png'
-        plt.savefig(fn,
-                   bbox_inches='tight', dpi=300)
+        fn = Path(output_dir or get_project_root()) / f'results/{hop}hop_capacity_vs_params_N{N}_{scheme}_{selection_scheme}{rel_str}.pdf'
+        plt.savefig(fn, bbox_inches='tight', format='pdf')
         plt.close()
+
+    # New combined plot with all N sizes
+    fig, ax = plt.subplots(figsize=DOUBLE_FIG)
+    
+    # Create color palette for N sizes
+    n_colors = len(N_sizes)
+    color_palette = sns.color_palette("husl", n_colors)
+    N_colors = dict(zip(sorted(N_sizes), color_palette))
+    
+    # Plot lines for each N
+    for N in sorted(N_sizes):
+        plot_df = filtered_df[filtered_df['N_profiles'] == N]
+        plot_df = plot_df[plot_df['layers'] == 4]
+        color = N_colors[N]
+        
+        # Plot total capacity
+        sns.scatterplot(data=plot_df, x='n_params', y='total_capacity', color=color, 
+                       label=f'N={N}', ax=ax, marker='o')
+        sns.lineplot(data=plot_df, x='n_params', y='total_capacity', color=color, ax=ax)
+        
+        # Plot baseline and dataset entropy with same color but different line styles
+        sns.lineplot(data=plot_df, x='n_params', y='baseline_capacity', color=color,
+                    linestyle='--', label=f'baseline N={N}', ax=ax)
+        sns.lineplot(data=plot_df, x='n_params', y='dataset_entropy', color=color,
+                    linestyle=':', label=f'entropy N={N}', ax=ax)
+    
+    # Add single max capacity line
+    max_params = filtered_df['n_params'].unique()
+    max_cap_df = pd.DataFrame({
+        'n_params': max_params,
+        'max_capacity': max_params * 2
+    })
+    sns.lineplot(data=max_cap_df, x='n_params', y='max_capacity', color='black',
+                linestyle='--', label='est. max capacity', ax=ax)
+    
+    ax.set_xscale('log')
+    ax.set_yscale('log')
+    ax.set_xlabel('Number of Parameters')
+    ax.set_ylabel('Capacity (bits)')
+    ax.set_title(f'{hop}-hop Capacity vs Parameters (All N)')
+    ax.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
+    
+    fn = Path(output_dir or get_project_root()) / f'results/{hop}hop_capacity_vs_params_combined_{scheme}_{selection_scheme}{rel_str}.pdf'
+    plt.savefig(fn, bbox_inches='tight', format='pdf')
+    plt.close()
 
 
 def cap_vs_norm_plot(df, scheme=None):
     """Plot capacity vs parameter norm using all timestep data."""
-    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(20, 8))
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=WIDE_FIG)
     
     # Plot 1-hop capacity
     sns.scatterplot(
@@ -157,7 +238,7 @@ def cap_vs_norm_plot(df, scheme=None):
     ax2.set_ylabel('2-hop Capacity (bits)')
     
     plt.tight_layout()
-    plt.savefig(get_project_root() / f'results/capacity_vs_norm_{scheme}.png', bbox_inches='tight')
+    plt.savefig(get_project_root() / f'results/capacity_vs_norm_{scheme}.pdf', bbox_inches='tight')
     plt.close()
 
 def capacity_plot(df, N_sizes, entropies_optimal, name_selection_entropy_optimal, birth_date_selection_entropy_optimal):
@@ -166,7 +247,7 @@ def capacity_plot(df, N_sizes, entropies_optimal, name_selection_entropy_optimal
     order_markers = {1: 'o', 2: '^'}
 
     for N in N_sizes:
-        plt.figure(figsize=(10, 6))
+        plt.figure(figsize=DOUBLE_FIG)
 
         # Calculate theoretical max capacities using calculate_capacities with zero losses
         zero_losses = [0.0, 1]  # Single loss value for calculate_capacities
@@ -201,7 +282,7 @@ def capacity_plot(df, N_sizes, entropies_optimal, name_selection_entropy_optimal
         plt.grid(True)
         plt.tight_layout()
         
-        plt.savefig(get_project_root() / f'results/capacity_plot_N{N}.png', bbox_inches='tight')
+        plt.savefig(get_project_root() / f'results/capacity_plot_N{N}.pdf', bbox_inches='tight')
         plt.close()
 
 
@@ -212,7 +293,7 @@ def get_nearest_param_color(param_count):
     return param_colors[idx]
 
 def normalized_capacity_plot(df, scheme):
-    plt.figure(figsize=(10, 6))
+    plt.figure(figsize=DOUBLE_FIG)
     
     order_markers = {1: 'o', 2: '^'}
     
@@ -241,7 +322,7 @@ def normalized_capacity_plot(df, scheme):
     plt.grid(True)
     plt.tight_layout()
     
-    plt.savefig(get_project_root() / f'results/capacity_plot_{scheme}.png', bbox_inches='tight')
+    plt.savefig(get_project_root() / f'results/capacity_plot_{scheme}.pdf', bbox_inches='tight')
     plt.close()
 
 def get_closest_step_data(df, target, use_normalized=True):
@@ -249,9 +330,9 @@ def get_closest_step_data(df, target, use_normalized=True):
     step_col = 'normalized_step' if use_normalized else 'global_step'
     return df.iloc[(df[step_col] - target).abs().argsort()].iloc[0]
 
-def plot_derivatives(df, scheme=None, selection_scheme=None, rel_str=None):
+def plot_derivatives(df, rel_str=None, output_dir=None):
     """Plot derivatives vs parameters for different N values."""
-    plt.figure(figsize=(12, 8))
+    plt.figure(figsize=DOUBLE_FIG)
     df = df[df['step'] > 2e6]
     df = df[~pd.isna(df['smoothed_derivative'])]
     
@@ -286,7 +367,7 @@ def plot_derivatives(df, scheme=None, selection_scheme=None, rel_str=None):
     plt.tight_layout()
     
     plt.savefig(
-        get_project_root() / f'results/derivatives_plot_{scheme}_{selection_scheme}{rel_str}.png',
+        Path(output_dir or get_project_root()) / f'results/derivatives_plot{rel_str}.pdf',
         bbox_inches='tight'
     )
     plt.close()
@@ -304,7 +385,7 @@ def loss_vs_normalized_capacity_plot(df, scheme=None, selection_scheme=None, rel
     
     for N in filtered_df['N_profiles'].unique():
         for layers in filtered_df['layers'].unique():
-            fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(20, 6))
+            fig, (ax1, ax2) = plt.subplots(1, 2, figsize=WIDE_FIG)
             
             plot_df = filtered_df[
                 (filtered_df['N_profiles'] == N) & 
@@ -342,8 +423,108 @@ def loss_vs_normalized_capacity_plot(df, scheme=None, selection_scheme=None, rel
                 
                 plt.tight_layout()
                 plt.savefig(
-                    get_project_root() / f'results/loss_vs_capacity_N{N}_L{layers}_{scheme}_{selection_scheme}{rel_str}.png',
+                    get_project_root() / f'results/loss_vs_capacity_N{N}_L{layers}_{scheme}_{selection_scheme}{rel_str}.pdf',
                     bbox_inches='tight',
-                    dpi=300
+                    format='pdf'
                 )
             plt.close()
+
+
+def plot_generalization_gap(eval_results, output_dir="."):
+    """Plot generalization gap over training steps."""
+    # Create figure with larger size
+    plt.figure(figsize=DOUBLE_FIG)
+    
+    # Group data by model configuration
+
+    train_data = eval_results[eval_results['mode'] == 'train_twohop']
+    eval_data = eval_results[eval_results['mode'] == 'eval_complete_two_hop_questions']
+
+    combined_data = pd.merge(train_data, eval_data, on=[
+                'hops', 
+                'global_step',
+                'N_profiles', 
+                'n_params', 
+                'layers', 
+                'relations', 
+                'max_train_hops',
+                'parameter_l2',
+                'min_train_hops',
+                'commit_hash',
+                'currency',
+                'lr',
+                'weight_decay',
+                'hop_ratio',
+                'optimizer'
+                ], suffixes=('_train', '_eval'))
+
+    combined_data = combined_data[~pd.isna(combined_data['loss_eval']) & ~pd.isna(combined_data['loss_train'])]
+
+    combined_data['generalization_gap'] = combined_data['loss_eval'] - combined_data['loss_train']
+
+    grouped = combined_data.groupby([
+        'N_profiles', 'n_params', 'layers', 'relations', 'commit_hash'
+    ])
+
+
+    # Create plot for each configuration
+    for name, group in grouped:
+        N, params, layers, relations, commit_hash = name
+        
+
+        plot_data = group[~pd.isna(group['generalization_gap'])].sort_values('global_step')
+        # Calculate generalization gap
+        gen_gap = plot_data['loss_eval'].values - plot_data['loss_train'].values
+        steps = plot_data['global_step'].values
+        
+        # Plot with label containing configuration details
+        label = f"N={N}, params={params}, layers={layers}, rels={relations}"
+        plt.plot(steps, gen_gap, label=label, alpha=0.7)
+    
+    plt.xlabel('Training Steps')
+    plt.ylabel('Generalization Gap (Eval - Train Loss)')
+    plt.title('Generalization Gap Over Training')
+    plt.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
+    plt.grid(True, alpha=0.3)
+
+    plt.savefig(
+        Path(output_dir or get_project_root()) / f'results/generalization_gap_per_N.pdf',
+        bbox_inches='tight'
+    )
+    plt.close()
+    
+    parameter_trend_data = combined_data.groupby([
+                'hops', 
+                'N_profiles', 
+                'n_params', 
+                'layers', 
+                'max_train_hops',
+                'commit_hash',
+                ])['generalization_gap'].max().reset_index()
+    
+    sns.lmplot(data=parameter_trend_data, x='n_params', y='generalization_gap', hue='N_profiles')
+
+    plt.savefig(
+        Path(output_dir or get_project_root()) / f'results/generalization_gap_max.pdf',
+        bbox_inches='tight'
+    )
+    plt.close()
+
+    combined_data = combined_data.sort_values('global_step')
+    final_gaps = combined_data.groupby([
+        'hops', 
+        'N_profiles', 
+        'n_params', 
+        'layers', 
+        'max_train_hops',
+        'commit_hash',
+        ])['generalization_gap'].last().reset_index()
+
+    sns.lmplot(data=final_gaps, x='n_params', y='generalization_gap', hue='N_profiles')
+    
+    # Adjust layout to prevent label cutoff
+
+    # # Save plot
+    output_path = Path(output_dir) / 'results' / 'generalization_gap_last.pdf'
+    plt.savefig(output_path, bbox_inches='tight', format='pdf')
+    plt.close()

@@ -36,10 +36,11 @@ def calculate_selection_entropy(
         end_date = datetime(2099, 12, 31)
         time_between_dates = end_date - start_date
         days_between_dates = time_between_dates.days
-        if selection_scheme == 'optimal':
-            birth_date_selection_entropy = len(values) * np.log2(days_between_dates) - len(values) * np.log2(len(values))
-        elif selection_scheme == 'enumerate':
-            birth_date_selection_entropy = len(values) * np.log2(days_between_dates)
+        n = len(values)
+        if selection_scheme in ['optimal', 'enumerate']:
+            birth_date_selection_entropy = (math.lgamma(days_between_dates + 1) - 
+                                         math.lgamma(n + 1) - 
+                                         math.lgamma(days_between_dates - n + 1)) / math.log(2)
         elif selection_scheme == 'independent':
             birth_date_selection_entropy = 0
         return birth_date_selection_entropy

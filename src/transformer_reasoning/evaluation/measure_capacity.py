@@ -1,6 +1,5 @@
 import argparse
-from collections import defaultdict
-import itertools
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
@@ -11,10 +10,12 @@ from datasets import load_dataset
 from transformer_reasoning.utils import get_project_root
 from transformer_reasoning.evaluation.measure_entropy import calculate_entropy, calculate_selection_entropy
 from transformer_reasoning.evaluation.eval_utils import load_eval_results
-from transformer_reasoning.evaluation.plot_capacity import cap_vs_N_plot, cap_vs_params_plot, plot_derivatives
+from transformer_reasoning.evaluation.plot_capacity import cap_vs_N_plot, cap_vs_params_plot, plot_derivatives, plot_generalization_gap
 from transformer_reasoning.generate_dataset.generate_profiles import RELATIONSHIP_TYPES
 
 import seaborn as sns
+
+from transformer_reasoning.evaluation.spec_config import ModelSpec, CommandConfig
 
 def invert_loss_two_hop(loss_b2, n=100):
 
@@ -180,9 +181,10 @@ def process_timestep_data(
         (eval_results['N_profiles'] == N) &
         (eval_results['mode']).isin(['train_onehop', 'train_twohop'])
     ]
-    # Group by model configuration
-    for (num_parameters, min_order, max_order, wd, eval_hops, global_step, layers), group in filtered_eval_results.groupby(
-        ['n_params', 'min_train_hops', 'max_train_hops', 'weight_decay', 'hops', 'global_step', 'layers']
+    
+    # Group by model configuration - include commit hash
+    for (num_parameters, min_order, max_order, wd, eval_hops, global_step, layers, commit_hash), group in filtered_eval_results.groupby(
+        ['n_params', 'min_train_hops', 'max_train_hops', 'weight_decay', 'hops', 'global_step', 'layers', 'commit_hash']
     ):
         total_losses_b2 = {}
         for _, row in group.iterrows():
@@ -190,7 +192,10 @@ def process_timestep_data(
             total_losses_b2[subject] = row['loss'] / np.log(2)
 
         total_losses_b2['all_questions'] = group['loss'].mean() / np.log(2)
-        matched_entropies = {attr: entropies[attr] for attr in total_losses_b2 if attr in entropies}
+        if per_attr:
+            matched_entropies = {attr: entropies[attr] for attr in total_losses_b2 if attr in entropies}
+        else:
+            matched_entropies = entropies
         # Calculate capacities
         capacities = calculate_capacities(
             total_losses_b2, 
@@ -216,8 +221,6 @@ def process_timestep_data(
             scheme,
             per_attr=per_attr
         )
-
-        
         result = {
             'n_params': num_parameters,
             'N_profiles': N,
@@ -230,7 +233,9 @@ def process_timestep_data(
             'capacity': capacities['total_capacity'],
             'baseline_capacity': name_selection_entropy + birth_date_selection_entropy,
             'dataset_entropy': dataset_entropy['total_capacity'],
-            'layers': layers
+            'layers': layers,
+            'relations': row['relations'],
+            'commit_hash': commit_hash  # Add commit hash to results
         }
 
         result.update(capacities)
@@ -369,7 +374,7 @@ def calculate_smoothed_derivative(group, window_size=15, num_points=50):
     last_entries = group.tail(num_points)
     
     if len(last_entries) < window_size:
-        return pd.DataFrame({'smoothed_derivative': [np.nan], 'step': [np.nan]})
+        return pd.DataFrame({'smoothed_derivative': [np.nan], 'step': [np.nan], 'relations': [np.nan]})
     
     results = []
     # Calculate derivatives using sliding window
@@ -381,7 +386,8 @@ def calculate_smoothed_derivative(group, window_size=15, num_points=50):
         middle_step = steps[len(steps)//2]
         results.append({
             'smoothed_derivative': np.mean(derivatives),
-            'step': middle_step
+            'step': middle_step,
+            'relations': window['relations'].values[0]
         })
     
     return pd.DataFrame(results)
@@ -405,7 +411,6 @@ def create_derivative_table(df):
         # Filter for steps > 1e6 and calculate derivatives for this group
         filtered_group = group[group['global_step'] > 1e6]
         derivatives = calculate_smoothed_derivative(filtered_group)
-        
         # Add configuration parameters to each row
         for _, row in derivatives.iterrows():
             results.append({
@@ -416,7 +421,8 @@ def create_derivative_table(df):
                 'weight_decay': weight_decay,
                 'hops': hops,
                 'smoothed_derivative': row['smoothed_derivative'],
-                'step': row['step']
+                'step': row['step'],
+                'relations': row['relations']
             })
     
 
@@ -427,105 +433,274 @@ def main():
     parser.add_argument("--checkpoint", type=str, default="latest")
     parser.add_argument("--scheme", type=str, choices=["optimal", "2-hop-big-hash", "2-hop-double"], default="optimal")
     parser.add_argument("--selection_scheme", type=str, choices=["optimal", "enumerate", "independent"], default="optimal")
-    parser.add_argument("--relations", type=int, default=None)
+    parser.add_argument("--relations", type=int, nargs="+", default=[None])  # Allow multiple relation counts
     parser.add_argument("--subjectwise", action="store_true")
     parser.add_argument("--skip_mode", action="store_true")
     parser.add_argument("--commit_hashes", nargs="+", default=[])
     parser.add_argument("--hops", type=int, default=2)
     parser.add_argument("--base_path", type=str, default=".")
+    parser.add_argument("--no_mup", action="store_true")
+    parser.add_argument("--output_dir", type=str, default=".")
+    parser.add_argument("--n_params", type=int, nargs="+", help="Filter by parameter counts")
+    parser.add_argument("--N_profiles", type=int, nargs="+", help="Filter by N profiles")
+    parser.add_argument("--layers", type=int, nargs="+", help="Filter by number of layers")
+    parser.add_argument("--min_train_hops", type=int, nargs="+", help="Filter by min train hops")
+    parser.add_argument("--max_train_hops", type=int, nargs="+", help="Filter by max train hops")
+    parser.add_argument("--weight_decay", type=float, nargs="+", help="Filter by weight decay")
     args = parser.parse_args()
 
-    eval_results = load_eval_results(skip_mode=args.skip_mode, commit_hashes=args.commit_hashes, subjectwise=args.subjectwise, base_path=args.base_path)
-    rel_str = f"_r{args.relations}" if args.relations else ""
+    # Create a ModelSpec for filtering
+    spec = ModelSpec(
+        commit_hashes=args.commit_hashes,
+        n_params=args.n_params,
+        N_profiles=args.N_profiles,
+        layers=args.layers,
+        min_train_hops=args.min_train_hops,
+        max_train_hops=args.max_train_hops,
+        weight_decay=args.weight_decay,
+        run_steps=[],  # Not used for filtering
+        cmd_options=CommandConfig()  # Not used for filtering
+    )
 
-    if 'subject' not in eval_results.columns:
-        eval_results['subject'] = np.nan
+    all_eval_results = []
+    for relation_count in args.relations:
+        # Load eval results for this relation count
+        eval_results = load_eval_results(
+            skip_mode=args.skip_mode, 
+            commit_hashes=args.commit_hashes, 
+            subjectwise=args.subjectwise, 
+            base_path=args.base_path,
+            no_mup=args.no_mup,
+            spec=spec  # Pass the spec for filtering
+        )
 
-    if not args.subjectwise:
-        eval_results = eval_results[pd.isna(eval_results['subject'])]
-    else:
-        eval_results = eval_results[~pd.isna(eval_results['subject'])]
+        if len(eval_results) == 0:
+            continue
 
-    if args.relations is not None:
-        eval_results = eval_results[eval_results['relations'] == args.relations]
-    else:
-        eval_results = eval_results[eval_results['relations'].isna()]
+        rel_str = f"_r{relation_count}" if relation_count else ""
 
-    N_sizes = list(set(eval_results['N_profiles']))
+        if 'subject' not in eval_results.columns:
+            eval_results['subject'] = np.nan
+
+        # Filter for specific relation count
+        if relation_count is not None:
+            eval_results = eval_results[eval_results['relations'] == relation_count]
+        else:
+            eval_results = eval_results[eval_results['relations'].isna()]
+
+        if not eval_results.empty:
+            all_eval_results.append(eval_results)
+
+    if not all_eval_results:
+        print("No results found for any relation count")
+        return
+
+    # Combine results from all relation counts
+    combined_results = pd.concat(all_eval_results, ignore_index=True)
+    
+    N_sizes = list(set(combined_results['N_profiles']))
 
     all_timestep_results = []
     final_results = []
     for N in N_sizes:
+        # Process each relation count separately for dataset loading
+        timestep_results_N = []
+        for relation_count in args.relations:
+            rel_str = f"_r{relation_count}" if relation_count and str(relation_count) != '4' else ""
+            
+            # Load and process dataset
+            try:
+                profiles_dataset = load_dataset(f"EleutherAI/profiles_dataset_{N}_uniform{rel_str}")['train']
+
+                # Calculate entropies
+                entropies, name_selection_entropy, birth_date_selection_entropy = dataset_component_entropies(
+                    profiles_dataset, 
+                    N, 
+                    args.scheme,
+                    args.selection_scheme
+                )
+                
+                # Filter results for this N and relation count
+                results_filter = combined_results[
+                    (combined_results['N_profiles'] == N) &
+                    (combined_results['mode'].isin(['train_onehop', 'train_twohop']))
+                ]
+                if relation_count is not None:
+                    results_filter = results_filter[results_filter['relations'] == relation_count]
+                else:
+                    results_filter = results_filter[results_filter['relations'].isna()]
+                
+                # Process timesteps
+                if not results_filter.empty:
+                    timestep_results = process_timestep_data(
+                        results_filter, 
+                        N, 
+                        entropies, 
+                        name_selection_entropy, 
+                        birth_date_selection_entropy,
+                        args.scheme,
+                        per_attr=args.subjectwise
+                    )
+                    timestep_results_N.append(timestep_results)
+            except Exception as e:
+                print(f"Error processing N={N}, relations={relation_count}: {e}")
+                continue
         
-        # Load and process dataset
-        profiles_dataset = load_dataset(f"EleutherAI/profiles_dataset_{N}_uniform{rel_str}")['train']
+        if timestep_results_N:
+            # Combine results for this N
+            timestep_results_combined = pd.concat(timestep_results_N, ignore_index=True)
+            all_timestep_results.append(timestep_results_combined)
+            
+            # Get final timestep results
+            final_timesteps = timestep_results_combined.groupby(
+                ['n_params', 'min_train_hops', 'max_train_hops', 'weight_decay', 'hops', 'relations', 'commit_hash']
+            ).last().reset_index()
+            final_results.append(final_timesteps)
 
-        # Calculate entropies
-        entropies, name_selection_entropy, birth_date_selection_entropy = dataset_component_entropies(
-            profiles_dataset, 
-            N, 
-            args.scheme,
-            args.selection_scheme
-        )
-        
-        # Process all timesteps
-        timestep_results = process_timestep_data(
-            eval_results, 
-            N, 
-            entropies, 
-            name_selection_entropy, 
-            birth_date_selection_entropy,
-            args.scheme,
-            per_attr=args.subjectwise
-        )
-        all_timestep_results.append(timestep_results)
-        # Get final timestep results for each configuration
-        final_timesteps = timestep_results.groupby(
-            ['n_params', 'min_train_hops', 'max_train_hops', 'weight_decay', 'hops']
-        ).last().reset_index()
-        final_results.append(final_timesteps)
+    if not all_timestep_results:
+        print("No valid results to process")
+        return
 
-
-    # Combine results
+    # Combine all results
     all_timestep_df = pd.concat(all_timestep_results, ignore_index=True)
     final_df = pd.concat(final_results, ignore_index=True)
     final_df = final_df[final_df['global_step'] >= 700000]
 
-    # Save all timestep results
-    all_timestep_df.to_csv(get_project_root() / f'results/capacity_results_all_timesteps_{args.scheme}_{args.selection_scheme}{rel_str}.csv', index=False)
-    final_df.to_csv(get_project_root() / f'results/capacity_results_{args.scheme}_{args.selection_scheme}{rel_str}.csv', index=False)
+    # Save results - now includes relation count in filenames
+    all_timestep_df.to_csv(
+        get_project_root() / f'results/capacity_results_all_timesteps_{args.scheme}_{args.selection_scheme}_combined.csv',
+        index=False
+    )
+    final_df.to_csv(
+        get_project_root() / f'results/capacity_results_{args.scheme}_{args.selection_scheme}_combined.csv',
+        index=False
+    )
 
-    # Adjust step counts if max steps > 5M
     def adjust_steps(row):
-        group_key = (row['n_params'], row['min_train_hops'], row['max_train_hops'], row['weight_decay'])
         steps = row['global_step']
-        return steps / N
+        return steps / row['N_profiles']
         
     all_timestep_df['normalized_step'] = all_timestep_df.apply(adjust_steps, axis=1)
 
-    # Generate plots
-    # normalized_capacity_plot(final_df, args.scheme)
-    # cap_vs_params_plot(all_timestep_df, N_sizes, scheme=args.scheme)
-    cap_vs_N_plot(all_timestep_df, scheme=args.scheme, selection_scheme=args.selection_scheme, rel_str=rel_str)
-    cap_vs_params_plot(all_timestep_df, scheme=args.scheme, selection_scheme=args.selection_scheme, rel_str=rel_str)
-    
-    
-    # Plot capacity vs norm using all timesteps
-    # cap_vs_norm_plot(all_timestep_df, scheme=args.scheme)
+    # Before the plot calls, add:
+    if len(args.relations) == 1:
+        rel_count = args.relations[0]
+        rel_str = f"_r{rel_count}" if rel_count else ""
+    else:
+        rel_str = "_combined"
 
-    if not args.subjectwise:
-        derivatives_df = create_derivative_table(eval_results)
-        derivatives_df.to_csv(
-            get_project_root() / f'results/loss_derivatives_{args.scheme}_{args.selection_scheme}{rel_str}.csv',
-            index=False
-        )
-        latest_derivates_df = derivatives_df.sort_values('step').groupby(['n_params', 'N_profiles', 'hops']).last().reset_index()
-        latest_derivates_df.to_csv(
-            get_project_root() / f'results/loss_derivatives_latest_{args.scheme}_{args.selection_scheme}{rel_str}.csv',
-            index=False
-        )
-        # Plot derivatives
-        plot_derivatives(derivatives_df, scheme=args.scheme, selection_scheme=args.selection_scheme, rel_str=rel_str)
+    if args.subjectwise:
+        # Load non-subjectwise results for derivatives
+        combined_overall_results = []
+        for relation_count in args.relations:
+            overall_results = load_eval_results(
+                skip_mode=args.skip_mode,
+                commit_hashes=args.commit_hashes,
+                subjectwise=False,
+                base_path=args.base_path,
+                no_mup=args.no_mup,
+                spec=spec
+            )
+            if len(overall_results) > 0:
+                if relation_count is not None:
+                    overall_results = overall_results[overall_results['relations'] == relation_count]
+                else:
+                    overall_results = overall_results[overall_results['relations'].isna()]
+                combined_overall_results.append(overall_results)
+        
+        derivatives_results = pd.concat(combined_overall_results, ignore_index=True) if combined_overall_results else pd.DataFrame()
+    else:
+        derivatives_results = combined_results
+    
+    derivatives_df = create_derivative_table(derivatives_results)
+    derivatives_df.to_csv(
+        Path(args.output_dir or get_project_root()) / f'results/loss_derivatives{rel_str}.csv',
+        index=False
+    )
+    # Plot derivatives
+    plot_derivatives(derivatives_df, rel_str=rel_str, output_dir=args.output_dir)
+
+
+    # Filter for derivatives below threshold
+    threshold = 2e-8
+    
+    # Calculate rolling mean of derivatives
+    derivatives_df['smoothed_derivative_rolling'] = derivatives_df.groupby(
+        ['n_params', 'N_profiles', 'hops', 'relations', 'layers', 'max_train_hops', 'weight_decay']
+    )['smoothed_derivative'].transform(lambda x: x.rolling(window=3, min_periods=1).mean())
+    
+    # Find timesteps where both modes are below threshold
+    derivatives_df['below_threshold'] = derivatives_df['smoothed_derivative_rolling'].abs() < threshold
+    
+    # Group by configuration and step to ensure both modes are below threshold
+    mode_counts = derivatives_df.groupby(
+        ['n_params', 'N_profiles', 'relations', 'layers', 'max_train_hops', 'weight_decay', 'step']
+    )['below_threshold'].sum().reset_index(name='mode_count')
+    
+    # Keep only steps where both modes are below threshold (mode_count == 2)
+    mode_counts['valid_step'] = mode_counts['mode_count'] == 2
+    valid_steps = mode_counts[mode_counts['valid_step']]
+    mode_counts_all_steps = mode_counts.groupby(
+        ['n_params', 'N_profiles', 'relations', 'layers', 'max_train_hops', 'weight_decay']
+    )['valid_step'].sum().reset_index()
+    never_converged = mode_counts_all_steps[mode_counts_all_steps['valid_step'] == 0]
+    # Save results
+    never_converged.to_csv(
+        Path(args.output_dir or get_project_root()) / f'results/never_converged{rel_str}.csv',
+        index=False
+    )
+    
+    derivatives_below_threshold = derivatives_df[derivatives_df['below_threshold']]
+    derivatives_below_threshold = derivatives_below_threshold.merge(
+        valid_steps[['n_params', 'N_profiles', 'relations', 'layers', 'max_train_hops', 'weight_decay', 'step']],
+        on=['n_params', 'N_profiles', 'relations', 'layers', 'max_train_hops', 'weight_decay', 'step']
+    )
+
+    # Filter all_timestep_df to only include steps where derivative is below threshold
+    timesteps_to_keep = derivatives_below_threshold[
+        ['n_params', 'N_profiles', 'hops', 'relations', 'step', 'layers', 'max_train_hops', 'weight_decay']
+        ].rename(columns={'step': 'global_step'})
+    timesteps_to_keep['global_step'] = timesteps_to_keep['global_step'].astype(int)
+    # all_timestep_df = all_timestep_df.merge(
+    #     timesteps_to_keep,
+    #     on=['n_params', 'N_profiles', 'hops', 'relations', 'global_step', 'layers', 'max_train_hops', 'weight_decay'],
+    #     how='inner'
+    # )
+
+    timesteps_to_keep.to_csv(
+        Path(args.output_dir or get_project_root()) / f'results/timesteps_to_keep{rel_str}.csv',
+        index=False
+    )
+    
+    latest_derivatives_df = derivatives_df.sort_values('step').groupby(
+        ['n_params', 'N_profiles', 'hops', 'relations']
+    ).last().reset_index()
+    latest_derivatives_df.to_csv(
+        Path(args.output_dir or get_project_root()) / f'results/loss_derivatives_latest{rel_str}.csv',
+        index=False
+    )
+
+    # Generate plots - now using dynamic rel_str
+    cap_vs_params_plot(all_timestep_df, scheme=args.scheme, selection_scheme=args.selection_scheme, rel_str=rel_str, hop=args.hops, output_dir=args.output_dir)
+
+    gen_eval_results = load_eval_results(
+        skip_mode=False,
+        subjectwise=False,
+        commit_hashes=args.commit_hashes
+    )
+
+    # Get unique combinations of parameters from all_timestep_df
+    config_filter = all_timestep_df[['n_params', 'layers', 'N_profiles', 'relations', 'commit_hash']].drop_duplicates()
+    
+    # Filter combined_results to only include these configurations
+    filtered_results = gen_eval_results.merge(
+        config_filter,
+        on=['n_params', 'layers', 'N_profiles', 'relations', 'commit_hash'],
+        how='inner'
+    )
+    filtered_results = filtered_results[filtered_results['layers']==4]
+
+    plot_generalization_gap(filtered_results, output_dir=args.output_dir)
 
 if __name__ == "__main__":
     main()

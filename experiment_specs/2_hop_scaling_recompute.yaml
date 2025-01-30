@@ -1,0 +1,22 @@
+commit_hashes:
+  - 2a8bb77
+  - 40e1da8
+  - 344bde1
+  - ecb2fdc
+  - no_git
+
+# Analysis steps to run in order
+run_steps:
+  - loss_over_time
+  - measure_capacity
+
+# Command line options
+cmd_options:
+  scheme: 2-hop-double
+  selection_scheme: enumerate
+  subjectwise: true
+  base_path: "."
+  compute_histograms: false
+  latest_only: true
+  output_dir: "./icml_draft/2_hop_scaling"
+  relations: [17]

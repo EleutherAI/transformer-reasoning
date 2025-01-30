@@ -8,6 +8,8 @@ from datasets import load_dataset
 import torch
 from tqdm import tqdm
 import numpy as np
+from typing import Optional
+from transformer_reasoning.evaluation.spec_config import ModelSpec
 
 def tokenwise_loss(inputs, logits):
     """Calculate per-token loss."""
@@ -18,26 +20,52 @@ def tokenwise_loss(inputs, logits):
     return loss
 
 
-def get_checkpoints(min_order, max_order, N, num_parameters, wd, commit_str, relations=None, layers=4):
+def get_checkpoints(min_order, max_order, N, num_parameters, wd, commit_hash, relations=None, layers=4):
+    """Get latest checkpoints across multiple commit directories."""
     relations_str = f'_r{str(relations).lstrip("_r")}' if relations is not None else ''
-    file_pattern = f'./results/{commit_str}/mup_n{N}_p{num_parameters}_omin{min_order}'\
+    
+    all_files = []
+
+    file_pattern = f'./results/{commit_hash}/mup_n{N}_p{num_parameters}_omin{min_order}'\
         f'_omax{max_order}_wd{wd}_l{layers}_lr0.001_beta10.99_sf{relations_str}/*'
     files = glob.glob(file_pattern)
-    return files
+    if files:
+        # Get latest checkpoint from this commit
+        latest = max(files, key=lambda x: int(x.split('-')[-1]) if 'checkpoint-' in x else 0)
+        all_files.append(latest)
+    
+    return all_files
 
 
-def load_eval_results(skip_mode=True, commit_hashes=[], subjectwise=False, base_path='.'):
-
+def load_eval_results(
+        skip_mode=True, 
+        commit_hashes=None,
+        subjectwise=False, 
+        base_path='.', 
+        no_mup=False,
+        spec: Optional['ModelSpec']=None):
+    """Load evaluation results, optionally filtering by specification."""
+    if no_mup:
+        # When no_mup is True, look for both prefixed and unprefixed files
+        mup_str = ['mup_', '']
+    else:
+        # Otherwise only look for mup_ prefixed files
+        mup_str = ['mup_']
+    
     if commit_hashes:
         files = []
         for commit_hash in commit_hashes:
-            if subjectwise:
-                files += glob.glob(f'{base_path}/results/{commit_hash}/mup_n*_p*_omin1_omax*_wd0.1_l*_lr0.001_beta10.99_sf*/eval_results_full.csv')
-            else:
-                files += glob.glob(f'{base_path}/results/{commit_hash}/mup_n*_p*_omin1_omax*_wd0.1_l*_lr0.001_beta10.99_sf*/eval_results.csv')
+            for prefix in mup_str:
+                if subjectwise:
+                    files += glob.glob(f'{base_path}/results/{commit_hash}/'+
+                                    f'{prefix}n*_p*_omin1_omax*_wd0.1_l*_lr0.001_beta10.99_sf*/eval_results_full.csv')
+                else:
+                    files += glob.glob(f'{base_path}/results/{commit_hash}/'+
+                                    f'{prefix}n*_p*_omin1_omax*_wd0.1_l*_lr0.001_beta10.99_sf*/eval_results.csv')
     else:
-        files = glob.glob(f'{base_path}/results/n*_p*_omin1_omax*_wd0.1_l*_lr0.001_beta10.99_sf*/eval_results.csv') + \
-            glob.glob(f'{base_path}/results/mup_n*_p*_omin1_omax*_wd0.1_l*_lr0.001_beta10.99_sf*/eval_results.csv')
+        files = []
+        for prefix in mup_str:
+            files += glob.glob(f'{base_path}/results/{prefix}n*_p*_omin1_omax*_wd0.1_l*_lr0.001_beta10.99_sf*/eval_results.csv')
 
     dfs = []
     for f in files:
@@ -48,22 +76,33 @@ def load_eval_results(skip_mode=True, commit_hashes=[], subjectwise=False, base_
             continue
         
         # Extract parameters from path
-        params = re.search(r'n(\d+)_p(\d+)_omin(\d+)_omax(\d+)_wd([\d\.]+)_l(\d+)_lr([\d\.]+)_beta1([\d\.]+)_(sf|adamw|adamw-linear)(_r\d+)?(_hr\d+)?', f)
-        n_profiles = int(params.group(1))
-        n_params = int(params.group(2))
-        min_train_hops = int(params.group(3))
-        max_train_hops = int(params.group(4))
-        weight_decay = float(params.group(5))
-        layers = int(params.group(6))
-        lr = float(params.group(7))
-        beta1 = float(params.group(8))
-        optimizer = params.group(9)
-        relations = int(params.group(10).lstrip('_r')) if params.group(10) else np.nan
-        hop_ratio = int(params.group(11).lstrip('_hr')) if params.group(11) else np.nan
+        params = re.search(r'n(\d+)_p(\d+)_omin(\d+)_omax(\d+)_wd([\d\.]+)'\
+                           +'_l(\d+)_lr([\d\.]+)_beta1([\d\.]+)_(sf|adamw|adamw-linear)'\
+                           +'(_r\d+)?(_hr\d+)?', f)
+        if not params:
+            continue
+            
+        config = {
+            'N_profiles': int(params.group(1)),
+            'n_params': int(params.group(2)),
+            'min_train_hops': int(params.group(3)),
+            'max_train_hops': int(params.group(4)),
+            'weight_decay': float(params.group(5)),
+            'layers': int(params.group(6)),
+            'lr': float(params.group(7)),
+            'beta1': float(params.group(8)),
+            'optimizer': params.group(9),
+            'relations': int(params.group(10).lstrip('_r')) if params.group(10) else 4,
+            'hop_ratio': int(params.group(11).lstrip('_hr')) if params.group(11) else None
+        }
+        
+        # Skip if doesn't match spec
+        if spec and not spec.matches_config(config):
+            continue
         
         # Extract commit hash from path if present
         commit_match = re.search(r'/results/([^/]+)/', f)
-        commit_hash = commit_match.group(1) if commit_match else 'unknown'
+        config['commit_hash'] = commit_match.group(1) if commit_match else 'unknown'
         
         # Add columns
         if 'mode' not in df.columns:
@@ -71,18 +110,10 @@ def load_eval_results(skip_mode=True, commit_hashes=[], subjectwise=False, base_
             df['mode'] = df['hops'].apply(lambda x: 'train_onehop' if x == 1 else 'train_twohop')
         else:
             df['hops'] = df['mode'].apply(lambda x: 1 if x == 'train_onehop' else 2)
-        df['lr'] = lr
-        df['layers'] = layers
-        df['weight_decay'] = weight_decay
-        df['optimizer'] = optimizer
-        df['beta1'] = beta1
-        df['relations'] = relations
-        df['hop_ratio'] = hop_ratio
-        df['N_profiles'] = n_profiles
-        df['n_params'] = n_params
-        df['min_train_hops'] = min_train_hops
-        df['max_train_hops'] = max_train_hops
-        df['commit_hash'] = commit_hash
+            
+        for k, v in config.items():
+            df[k] = v
+            
         df['currency'] = 'current'
         if 'old' in f:
             df['currency'] = 'old'
@@ -91,8 +122,10 @@ def load_eval_results(skip_mode=True, commit_hashes=[], subjectwise=False, base_
         
         dfs.append(df)
 
-    df = pd.concat(dfs)
-    return df
+    if not dfs:
+        return pd.DataFrame()
+        
+    return pd.concat(dfs)
 
 def evaluate_model_histograms(model, onehop_loader, twohop_loader):
     """Evaluate model and return individual losses for each question."""
